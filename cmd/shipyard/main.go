@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -52,6 +53,8 @@ func run(args []string) error {
 		return fmt.Errorf("usage: shipyard daemon run")
 	case "doctor":
 		return runDoctor()
+	case "call":
+		return runCall(paths, args[1:])
 	case "mcp-lead":
 		return orch.RunLeadMCP(paths, args[1:])
 	default:
@@ -117,6 +120,29 @@ func runTUI(paths config.Paths) error {
 	}
 	defer cl.Close()
 	return tui.Run(cl)
+}
+
+// runCall is a scripting/debugging passthrough: `shipyard call <method>
+// [json-params]` prints the raw RPC result. Auto-starts the daemon.
+func runCall(paths config.Paths, args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: shipyard call <method> [json-params]")
+	}
+	cl, err := connect(paths)
+	if err != nil {
+		return err
+	}
+	defer cl.Close()
+	var params json.RawMessage
+	if len(args) > 1 {
+		params = json.RawMessage(args[1])
+	}
+	var out json.RawMessage
+	if err := cl.Call(args[0], params, &out); err != nil {
+		return err
+	}
+	fmt.Println(string(out))
+	return nil
 }
 
 func runDoctor() error {

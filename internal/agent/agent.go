@@ -7,6 +7,7 @@ import "context"
 
 // Spec describes one agent session to start.
 type Spec struct {
+	Model           string   // model override ("" = harness default)
 	WorkDir         string   // cwd for the agent process
 	SystemPrompt    string   // appended system prompt (role, tools contract)
 	Prompt          string   // initial user prompt (brief); optional when resuming

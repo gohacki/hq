@@ -474,19 +474,23 @@ func (m *model) sidebarView(height int) string {
 	for i, it := range m.items {
 		var line string
 		if it.task == nil {
-			name := "# " + it.channel.Name
 			badge := ""
+			pad := 0
 			if it.channel.Unread > 0 {
 				badge = " " + styleBadge.Render(fmt.Sprint(it.channel.Unread))
+				pad = 3 + len(fmt.Sprint(it.channel.Unread))
 			}
+			name := "# " + truncate(it.channel.Name, sidebarWidth-4-pad)
 			line = styleSideChan.Render(name) + badge
 		} else {
 			t := it.task
-			name := fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8))
 			badge := ""
+			pad := 0
 			if t.Unread > 0 {
 				badge = " " + styleBadge.Render(fmt.Sprint(t.Unread))
+				pad = 3 + len(fmt.Sprint(t.Unread))
 			}
+			name := fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8-pad))
 			line = styleSideTask.Render(name) + badge
 		}
 		if i == m.cursor && m.focus == focusSidebar {

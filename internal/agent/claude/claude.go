@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"time"
@@ -18,9 +19,13 @@ import (
 type Harness struct {
 	// Bin overrides the claude binary path (tests use a fake).
 	Bin string
+	// Model is the default model for all sessions ("" = claude's default).
+	// SHIPYARD_MODEL overrides it at daemon start (e.g. "sonnet" to run the
+	// whole fleet on a cheaper tier).
+	Model string
 }
 
-func New() *Harness { return &Harness{Bin: "claude"} }
+func New() *Harness { return &Harness{Bin: "claude", Model: os.Getenv("SHIPYARD_MODEL")} }
 
 func (h *Harness) InteractiveCommand(sessionID string) []string {
 	return []string{h.Bin, "--resume", sessionID}
@@ -32,6 +37,13 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose", // required with -p + stream-json output
+	}
+	model := spec.Model
+	if model == "" {
+		model = h.Model
+	}
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 	if spec.SystemPrompt != "" {
 		args = append(args, "--append-system-prompt", spec.SystemPrompt)

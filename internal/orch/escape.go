@@ -1,7 +1,6 @@
 package orch
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -56,13 +55,15 @@ func (o *Orch) escapeHatch(taskID string) (string, error) {
 	}
 	exec.Command("tmux", "select-pane", "-t", winName+".0").Run()
 
-	go o.watchEscapeWindow(t, winName)
+	go o.watchEscapeWindow(t, winName, prev)
 	return winName, nil
 }
 
 // watchEscapeWindow polls for the tmux window; when it's gone the captain is
-// done steering and headless supervision resumes on the same session.
-func (o *Orch) watchEscapeWindow(t store.Task, winName string) {
+// done steering and headless supervision resumes on the same session. A task
+// that was already terminal before the escape returns to that status instead
+// of being parked.
+func (o *Orch) watchEscapeWindow(t store.Task, winName string, prev store.TaskStatus) {
 	for {
 		time.Sleep(3 * time.Second)
 		out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
@@ -74,13 +75,19 @@ func (o *Orch) watchEscapeWindow(t store.Task, winName string) {
 	if err != nil || cur.Status != store.TaskAttached {
 		return // task moved on while attached (e.g. captain abandoned it)
 	}
+	if prev.Terminal() {
+		cur.Status = prev
+		if err := o.d.UpdateTask(cur); err != nil {
+			o.log.Error("update task", "err", err)
+		}
+		return
+	}
 	cur.Status = store.TaskNeedsInput
 	if err := o.d.UpdateTask(cur); err != nil {
 		o.log.Error("update task", "err", err)
 	}
 	o.systemMessage(cur.ChannelID, cur.ID,
 		"escape-hatch window closed — reply in this thread to resume headless supervision")
-	_ = context.Background()
 }
 
 func shellJoin(argv []string) string {
