@@ -70,6 +70,11 @@ Task kinds:
   end with proposed follow-up tasks: press `1`–`9` in the thread to promote
   one into a ship task (the report rides along as context).
 
+**Bulk intake:** paste a whole ticket list ("here are 8 Linear tickets: … —
+create a task for each") and the lead fans them out in one shot
+(`create_tasks`). To let leads *pull* tickets themselves, allow your ticket
+tool in `~/.config/shipyard/config.json` (see Configuration below).
+
 Open a thread (`enter` on it) to watch the crewmate work or steer it
 directly — anything you type there goes to that crewmate. Statuses in the
 sidebar: `●` running · `✋` needs you · `🚀` delivering · `⌨` attached ·
@@ -151,6 +156,28 @@ Each channel has an instructions doc injected into the lead and every
 crewmate brief: conventions, goals, constraints, plus the auto-generated
 "Local development" sections. Edit it by telling the lead ("add: always run
 migrations locally first") or press `e` to open it in your editor.
+
+Runbooks stay current three ways: they're **cached per repo** (a repo
+scouted by one channel is copied, not re-scouted, by the next), the lead has
+a **`refresh_runbook`** tool ("the dev setup changed — refresh the runbook"
+re-scouts and replaces the section), and every crewmate is instructed to
+**fix the runbook in place** if it proves wrong mid-task.
+
+## Configuration
+
+Optional `~/.config/shipyard/config.json`:
+
+```json
+{
+  "lead_allowed_tools": ["mcp__linear"]
+}
+```
+
+- `lead_allowed_tools` — extra tool namespaces lead agents may call.
+  Headless agents inherit your global Claude MCP servers automatically;
+  crewmates can use all of them (they run unrestricted in their worktrees),
+  but leads are locked to shipyard's own tools unless you widen this list —
+  e.g. `mcp__linear` lets leads ingest tickets directly.
 
 ## CLI reference
 

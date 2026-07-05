@@ -16,8 +16,11 @@ channel's single point of contact.
 Your job is judgment, never labor:
 - Talk with the captain about the project; answer from what you know.
 - Decompose asks into tasks and delegate them with the shipyard MCP tools
-  (create_task). kind="ship" delivers a code change; kind="scout"
-  investigates and produces a report.
+  (create_task; create_tasks for bulk intake like a pasted ticket list).
+  kind="ship" delivers a code change; kind="scout" investigates and produces
+  a report.
+- If the captain says the local dev setup changed or the runbook is stale,
+  use refresh_runbook.
 - Write rich briefs: goal, context, constraints, what done means. Crewmates
   see only their brief and the channel instructions.
 - Steer running crewmates with message_task; read scout output with
@@ -61,10 +64,34 @@ Keep replies short and Slack-like. Never run shell commands; use only the
 shipyard MCP tools.`
 }
 
-// runbookBrief is the task brief for the dev-runbook scout auto-spawned when
-// a channel gains a repo: it teaches the channel how local development works
-// so every future crewmate can hand the captain runnable test instructions.
-func runbookBrief(ch store.Channel, repo store.Repo) string {
+// runbookBrief is the task brief for the dev-runbook scout: it teaches the
+// channel how local development works so every future crewmate can hand the
+// captain runnable test instructions. The section is also written to a
+// per-repo cache so other channels sharing the repo skip the scout.
+func runbookBrief(ch store.Channel, repo store.Repo, cachePath string, refresh bool) string {
+	action := fmt.Sprintf(`Then APPEND a concise, copy-paste-runnable "## Local development — %s"
+section to the channel instructions file at exactly this path (create the
+section; do not delete existing content):
+
+    %s
+
+Also write JUST that section (same content) to this cache file, creating or
+overwriting it — other channels that use this repo copy it from there:
+
+    %s`, repo.Name, ch.InstructionsPath, cachePath)
+	if refresh {
+		action = fmt.Sprintf(`This is a REFRESH — the dev workflow has changed. In the channel
+instructions file at exactly this path, REPLACE the existing
+"## Local development — %s" section with your updated version (append it if
+missing; leave all other content untouched):
+
+    %s
+
+Also overwrite this cache file with JUST the new section — other channels
+copy it from there:
+
+    %s`, repo.Name, ch.InstructionsPath, cachePath)
+	}
 	return fmt.Sprintf(`Investigate how local development is done in the %s repo, then document it
 for the whole channel.
 
@@ -78,22 +105,23 @@ Figure out (from README, package manifests, Makefiles, scripts, CI config):
    (env var, flag, config), e.g. "PORT=<any free port> npm run dev".
    Verify your commands actually work by running them in this worktree.
 
-Then APPEND a concise, copy-paste-runnable "## Local development — %s"
-section to the channel instructions file at exactly this path (create the
-section; do not delete existing content):
-
-    %s
+%s
 
 Write your normal report too, summarizing what you documented and flagging
 anything that makes parallel dev servers impossible (propose fixes as tasks).`,
-		repo.Name, repo.Name, ch.InstructionsPath)
+		repo.Name, action)
 }
 
 // crewBrief renders the prompt a crewmate is launched with.
 func crewBrief(ch store.Channel, t store.Task, repo store.Repo, brief string) string {
 	instructions := ""
 	if b, err := os.ReadFile(ch.InstructionsPath); err == nil && len(strings.TrimSpace(string(b))) > 0 {
-		instructions = "\n## Channel instructions\n\n" + string(b) + "\n"
+		instructions = "\n## Channel instructions\n\n" + string(b) + fmt.Sprintf(`
+
+(If a "Local development" section above proves wrong or outdated while you
+work, correct it in the channel instructions file at %s as part of your task
+and mention the fix — the next crewmate depends on it.)
+`, ch.InstructionsPath)
 	}
 
 	var sb strings.Builder

@@ -133,6 +133,15 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 	if ch.Name == daemon.HomeChannelName {
 		sysPrompt = homeSystemPrompt()
 	}
+	// Leads are tool-restricted by design (judgment, no shell). Users widen
+	// the allowlist via config.json lead_allowed_tools (e.g. "mcp__linear")
+	// to let leads read tickets etc. from their global MCP servers.
+	allowed := []string{"mcp__shipyard"}
+	if settings, err := o.d.Paths.LoadSettings(); err == nil {
+		allowed = append(allowed, settings.LeadAllowedTools...)
+	} else {
+		o.log.Error("load settings", "err", err)
+	}
 	sess, err := o.harness.Start(ctx, agent.Spec{
 		Model:           ch.LeadModel,
 		WorkDir:         o.d.Paths.ChannelDir(ch.Name),
@@ -140,7 +149,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 		Prompt:          prompt,
 		ResumeSessionID: ch.LeadSessionID,
 		MCPConfigPath:   mcpPath,
-		AllowedTools:    []string{"mcp__shipyard"},
+		AllowedTools:    allowed,
 	})
 	if err != nil && ch.LeadSessionID != "" {
 		// Stale session id (e.g. claude storage cleaned) — start fresh.
@@ -150,7 +159,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 			SystemPrompt:  sysPrompt,
 			Prompt:        prompt,
 			MCPConfigPath: mcpPath,
-			AllowedTools:  []string{"mcp__shipyard"},
+			AllowedTools:  allowed,
 		})
 	}
 	if err != nil {
@@ -264,12 +273,57 @@ func (o *Orch) registerHandlers() {
 		}
 		bg := context.WithoutCancel(ctx)
 		for _, r := range repos {
-			if _, err := o.createTask(bg, ch.ID, r.Name, "scout",
-				"Map local development workflow ("+r.Name+")", runbookBrief(ch, r), ""); err != nil {
-				o.log.Error("runbook scout spawn failed", "repo", r.Name, "err", err)
-			}
+			o.seedRunbook(bg, ch, r)
 		}
 		return ch, nil
+	})
+
+	srv.Handle("runbook.refresh", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ChannelID string `json:"channel_id"`
+			Repo      string `json:"repo"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return o.refreshRunbook(context.WithoutCancel(ctx), p.ChannelID, p.Repo)
+	})
+
+	srv.Handle("tasks.create_batch", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ChannelID string `json:"channel_id"`
+			Tasks     []struct {
+				Repo  string `json:"repo"`
+				Kind  string `json:"kind"`
+				Title string `json:"title"`
+				Brief string `json:"brief"`
+				Model string `json:"model"`
+			} `json:"tasks"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if len(p.Tasks) == 0 {
+			return nil, fmt.Errorf("tasks is empty")
+		}
+		bg := context.WithoutCancel(ctx)
+		type result struct {
+			Title string `json:"title"`
+			ID    string `json:"id,omitempty"`
+			Error string `json:"error,omitempty"`
+		}
+		out := make([]result, 0, len(p.Tasks))
+		for _, spec := range p.Tasks {
+			t, err := o.createTask(bg, p.ChannelID, spec.Repo, spec.Kind, spec.Title, spec.Brief, spec.Model)
+			r := result{Title: spec.Title}
+			if err != nil {
+				r.Error = err.Error()
+			} else {
+				r.ID = t.ID
+			}
+			out = append(out, r)
+		}
+		return out, nil
 	})
 
 	// model.set changes an agent's model on the fly. Live sessions are

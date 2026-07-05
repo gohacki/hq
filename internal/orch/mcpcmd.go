@@ -74,6 +74,44 @@ func leadTools(cl *rpc.Client, channelID string, home bool) []mcp.Tool {
 			},
 		},
 		{
+			Name:        "create_tasks",
+			Description: "Delegate MANY tasks at once (e.g. one per ticket from a backlog). Same semantics as create_task, one array. Returns per-task ids/errors.",
+			InputSchema: obj(map[string]any{
+				"tasks": map[string]any{"type": "array", "items": obj(map[string]any{
+					"repo":  str("repo name within this channel (omit if the channel has exactly one)"),
+					"kind":  map[string]any{"type": "string", "enum": []string{"ship", "scout"}},
+					"title": str("short imperative title"),
+					"brief": str("full task brief (markdown)"),
+					"model": str("optional model override for this crewmate"),
+				}, "kind", "title", "brief")},
+			}, "tasks"),
+			Run: func(a json.RawMessage) (string, error) {
+				var p struct {
+					Tasks json.RawMessage `json:"tasks"`
+				}
+				if err := json.Unmarshal(a, &p); err != nil {
+					return "", err
+				}
+				return call("tasks.create_batch", map[string]any{
+					"channel_id": channelID, "tasks": p.Tasks,
+				})
+			},
+		},
+		{
+			Name:        "refresh_runbook",
+			Description: "Re-scout how local development works for a repo and replace the 'Local development' section of the channel instructions (and the shared per-repo cache). Use when the captain says the dev setup/process changed or the runbook is stale.",
+			InputSchema: obj(map[string]any{
+				"repo": str("repo name within this channel (omit if the channel has exactly one)"),
+			}),
+			Run: func(a json.RawMessage) (string, error) {
+				var p struct{ Repo string }
+				if err := json.Unmarshal(a, &p); err != nil {
+					return "", err
+				}
+				return call("runbook.refresh", map[string]any{"channel_id": channelID, "repo": p.Repo})
+			},
+		},
+		{
 			Name:        "set_model",
 			Description: "Change an agent's model on the fly (session resumes with full context). scope=self upgrades/downgrades you (takes effect next turn), scope=task switches a live crewmate, scope=crew sets this channel's default for future crewmates. Models: sonnet (default, cheap) | opus | fable (strongest) | haiku (fastest).",
 			InputSchema: obj(map[string]any{
