@@ -89,6 +89,9 @@ func TestDaemonEndToEnd(t *testing.T) {
 	if ch.Delivery != "no-mistakes" {
 		t.Fatalf("default delivery: %q", ch.Delivery)
 	}
+	if ch.Verify != "on-completion" {
+		t.Fatalf("default verify: %q", ch.Verify)
+	}
 	if err := cl.Call("channels.list", nil, &chs); err != nil {
 		t.Fatal(err)
 	}
@@ -116,6 +119,9 @@ func TestDaemonEndToEnd(t *testing.T) {
 	}
 	if err := cl.Call("channels.create", map[string]any{"name": "x", "delivery": "yolo"}, nil); err == nil {
 		t.Fatal("want invalid-delivery error")
+	}
+	if err := cl.Call("channels.create", map[string]any{"name": "x", "verify": "sometimes"}, nil); err == nil {
+		t.Fatal("want invalid-verify error")
 	}
 	if err := cl.Call("channels.create", map[string]any{"name": "y", "repos": []string{t.TempDir()}}, nil); err == nil {
 		t.Fatal("want not-a-git-repo error")

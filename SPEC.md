@@ -35,7 +35,20 @@ keybinding-driven form exists for non-conversational setup.
 Channel settings (editable later):
 - `repos`: list of registered repos (local path; cloned if given a URL)
 - `delivery`: `no-mistakes` (default) | `direct-pr` | `local-only`
+- `verify`: `on-completion` (default) | `before-delivery` | `none` — the
+  stage at which crewmates hand work back to the captain for **manual
+  verification**: a message with what changed + exact hand-test instructions
+  (dev server started from the crewmate's own worktree on a unique port, URL
+  included), ending in a question. `STATUS: done` — and worktree teardown —
+  only after the captain signs off.
 - `instructions`: path to the channel instructions doc
+
+Channel creation also auto-spawns a **dev-runbook scout** per repo: it
+investigates how local development works (deps, tests, dev server command)
+and appends a `## Local development — <repo>` section to the channel
+instructions, specifically documenting how to run multiple simultaneous dev
+servers from different worktrees (port/db/cache overrides). Every future
+brief inherits it.
 
 ### Lead agent (one per channel)
 

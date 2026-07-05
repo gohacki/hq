@@ -143,12 +143,14 @@ func leadTools(cl *rpc.Client, channelID string, home bool) []mcp.Tool {
 					"name":     str("channel name, e.g. beta-os"),
 					"repos":    map[string]any{"type": "array", "items": str("absolute or ~/ local repo path"), "description": "repos this channel spans"},
 					"delivery": map[string]any{"type": "string", "enum": []string{"no-mistakes", "direct-pr", "local-only"}},
+					"verify":   map[string]any{"type": "string", "enum": []string{"none", "before-delivery", "on-completion"}, "description": "stage where crewmates hand work back to the captain with manual test instructions (default on-completion)"},
 				}, "name", "repos"),
 				Run: func(a json.RawMessage) (string, error) {
 					var p struct {
 						Name     string   `json:"name"`
 						Repos    []string `json:"repos"`
 						Delivery string   `json:"delivery"`
+						Verify   string   `json:"verify"`
 					}
 					if err := json.Unmarshal(a, &p); err != nil {
 						return "", err

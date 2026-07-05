@@ -29,7 +29,9 @@ Hard rules:
   Every code change or investigation goes through a crewmate task.
 - Keep replies short and Slack-like. No headers, no ceremony.
 - Do not invent task status; use list_tasks.
-- Delivery mode for this channel: %s.`, ch.Name, ch.Delivery)
+- Delivery mode for this channel: %s. Verification mode: %s — crewmates hand
+  finished work back to the captain with manual test instructions at that
+  stage; when relaying, make sure the captain sees the test instructions.`, ch.Name, ch.Delivery, ch.Verify)
 }
 
 func homeSystemPrompt() string {
@@ -40,7 +42,12 @@ Each project is a channel with its own lead agent and crew.
 Your job:
 - Create channels when asked: use the create_channel MCP tool (name, list of
   local repo paths, delivery mode: no-mistakes | direct-pr | local-only,
-  default no-mistakes). Confirm what was created.
+  default no-mistakes; verify mode: none | before-delivery | on-completion,
+  default on-completion — the stage where crewmates hand work back to the
+  captain with manual test instructions). If the captain didn't specify a
+  verify mode, briefly ask or state the default you picked. Channel creation
+  auto-runs a scout per repo that documents the local dev workflow (dev
+  servers, parallel worktrees) into the channel instructions — mention that.
 - Answer questions about shipyard itself and list existing channels
   (list_channels).
 - Route the captain: project work happens in that project's channel with its
@@ -48,6 +55,34 @@ Your job:
 
 Keep replies short and Slack-like. Never run shell commands; use only the
 shipyard MCP tools.`
+}
+
+// runbookBrief is the task brief for the dev-runbook scout auto-spawned when
+// a channel gains a repo: it teaches the channel how local development works
+// so every future crewmate can hand the captain runnable test instructions.
+func runbookBrief(ch store.Channel, repo store.Repo) string {
+	return fmt.Sprintf(`Investigate how local development is done in the %s repo, then document it
+for the whole channel.
+
+Figure out (from README, package manifests, Makefiles, scripts, CI config):
+1. How to install dependencies and run the test suite.
+2. How to start the app/dev server locally — the exact command.
+3. Critically: how to run MULTIPLE fully functional dev servers at the same
+   time from DIFFERENT git worktrees of this repo (the captain hand-verifies
+   crewmate changes this way). Identify every collision point — ports,
+   database files, caches, sockets — and give the exact way to override each
+   (env var, flag, config), e.g. "PORT=<any free port> npm run dev".
+   Verify your commands actually work by running them in this worktree.
+
+Then APPEND a concise, copy-paste-runnable "## Local development — %s"
+section to the channel instructions file at exactly this path (create the
+section; do not delete existing content):
+
+    %s
+
+Write your normal report too, summarizing what you documented and flagging
+anything that makes parallel dev servers impossible (propose fixes as tasks).`,
+		repo.Name, repo.Name, ch.InstructionsPath)
 }
 
 // crewBrief renders the prompt a crewmate is launched with.
@@ -88,9 +123,13 @@ section if none).
 
 Create a feature branch, implement, commit. Then validate and deliver with
 the no-mistakes pipeline: run ` + "`no-mistakes axi run --intent \"<rich intent>\"`" + `
-and drive its gates (respond with ` + "`no-mistakes axi respond`" + `). If a gate
-finding is marked ask-user, STOP and relay it verbatim as a question (see
-protocol below) — never decide ask-user findings yourself.
+and drive its gates (respond with ` + "`no-mistakes axi respond`" + `). The run
+blocks synchronously and can take many minutes — keep waiting on it; NEVER end
+your turn while the run is still in progress. Only two things end this task:
+an outcome (checks-passed/passed → report STATUS: done with the PR link;
+failed → fix, recommit, rerun) or an ask-user gate finding, which you STOP
+and relay verbatim as a question (see protocol below) — never decide ask-user
+findings yourself.
 `)
 		case "direct-pr":
 			sb.WriteString(`## Deliverable: pull request
@@ -103,6 +142,41 @@ the repo's usual tooling. Include the PR URL in your final message.
 
 Create a feature branch, implement, commit. Do NOT push or open a PR; the
 captain merges locally. Name the branch in your final message.
+`)
+		}
+	}
+
+	if t.Kind == "ship" {
+		switch ch.Verify {
+		case "before-delivery":
+			sb.WriteString(`
+## Verification handback (mandatory — BEFORE delivery)
+
+After implementing and committing — before any delivery steps (pipeline,
+push, PR) — hand the change back to the captain for manual verification:
+post one message with (a) a short summary of what changed, (b) exact
+copy-paste instructions to test it by hand from THIS worktree, following the
+"Local development" section of the channel instructions if present. If a dev
+server is involved, START IT YOURSELF from this worktree on a unique free
+port (never the project default) and give the captain the URL; leave it
+running. End that turn with a QUESTION asking the captain to verify. Proceed
+with delivery only after the captain approves; then stop any servers you
+started.
+`)
+		case "on-completion":
+			sb.WriteString(`
+## Verification handback (mandatory — after delivery)
+
+After completing delivery, do NOT report STATUS: done yet. First hand the
+change back to the captain for manual verification: post one message with
+(a) a short summary of what changed and where it landed (branch/PR), (b)
+exact copy-paste instructions to test it by hand from THIS worktree,
+following the "Local development" section of the channel instructions if
+present. If a dev server is involved, START IT YOURSELF from this worktree
+on a unique free port (never the project default) and give the captain the
+URL; leave it running. End that turn with a QUESTION asking the captain to
+verify. Report STATUS: done only after the captain confirms; then stop any
+servers you started.
 `)
 		}
 	}

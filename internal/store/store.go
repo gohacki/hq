@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -79,8 +80,15 @@ CREATE TABLE IF NOT EXISTS reads (
 `
 
 func (s *Store) migrate() error {
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	// Additive column migrations; duplicate-column errors mean already applied.
+	if _, err := s.db.Exec(`ALTER TABLE channels ADD COLUMN verify TEXT NOT NULL DEFAULT 'on-completion'`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
+	return nil
 }
 
 var ErrNotFound = errors.New("not found")
@@ -93,6 +101,7 @@ type Channel struct {
 	ID               string
 	Name             string
 	Delivery         string
+	Verify           string // none | before-delivery | on-completion
 	InstructionsPath string
 	LeadSessionID    string
 	CreatedAt        int64
@@ -100,21 +109,32 @@ type Channel struct {
 
 func (s *Store) CreateChannel(c Channel) error {
 	c.CreatedAt = now()
-	_, err := s.db.Exec(`INSERT INTO channels (id, name, delivery, instructions_path, lead_session_id, created_at) VALUES (?,?,?,?,?,?)`,
-		c.ID, c.Name, c.Delivery, c.InstructionsPath, c.LeadSessionID, c.CreatedAt)
+	if c.Verify == "" {
+		c.Verify = "on-completion"
+	}
+	_, err := s.db.Exec(`INSERT INTO channels (id, name, delivery, verify, instructions_path, lead_session_id, created_at) VALUES (?,?,?,?,?,?,?)`,
+		c.ID, c.Name, c.Delivery, c.Verify, c.InstructionsPath, c.LeadSessionID, c.CreatedAt)
 	return err
 }
 
+const channelCols = `id, name, delivery, verify, instructions_path, lead_session_id, created_at`
+
+func scanChannel(row interface{ Scan(...any) error }) (Channel, error) {
+	var c Channel
+	err := row.Scan(&c.ID, &c.Name, &c.Delivery, &c.Verify, &c.InstructionsPath, &c.LeadSessionID, &c.CreatedAt)
+	return c, err
+}
+
 func (s *Store) Channels() ([]Channel, error) {
-	rows, err := s.db.Query(`SELECT id, name, delivery, instructions_path, lead_session_id, created_at FROM channels ORDER BY name`)
+	rows, err := s.db.Query(`SELECT ` + channelCols + ` FROM channels ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Channel
 	for rows.Next() {
-		var c Channel
-		if err := rows.Scan(&c.ID, &c.Name, &c.Delivery, &c.InstructionsPath, &c.LeadSessionID, &c.CreatedAt); err != nil {
+		c, err := scanChannel(rows)
+		if err != nil {
 			return nil, err
 		}
 		out = append(out, c)
@@ -123,9 +143,7 @@ func (s *Store) Channels() ([]Channel, error) {
 }
 
 func (s *Store) ChannelByName(name string) (Channel, error) {
-	var c Channel
-	err := s.db.QueryRow(`SELECT id, name, delivery, instructions_path, lead_session_id, created_at FROM channels WHERE name = ?`, name).
-		Scan(&c.ID, &c.Name, &c.Delivery, &c.InstructionsPath, &c.LeadSessionID, &c.CreatedAt)
+	c, err := scanChannel(s.db.QueryRow(`SELECT `+channelCols+` FROM channels WHERE name = ?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -133,9 +151,7 @@ func (s *Store) ChannelByName(name string) (Channel, error) {
 }
 
 func (s *Store) ChannelByID(id string) (Channel, error) {
-	var c Channel
-	err := s.db.QueryRow(`SELECT id, name, delivery, instructions_path, lead_session_id, created_at FROM channels WHERE id = ?`, id).
-		Scan(&c.ID, &c.Name, &c.Delivery, &c.InstructionsPath, &c.LeadSessionID, &c.CreatedAt)
+	c, err := scanChannel(s.db.QueryRow(`SELECT `+channelCols+` FROM channels WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -272,6 +288,26 @@ func (s *Store) TasksForChannel(channelID string) ([]Task, error) {
 func (s *Store) ActiveTasks() ([]Task, error) {
 	rows, err := s.db.Query(`SELECT id, channel_id, repo_id, kind, title, status, branch, worktree_path, session_id, brief_path, report_path, created_at, updated_at
 		FROM tasks WHERE status NOT IN ('done','failed','abandoned')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Task
+	for rows.Next() {
+		var t Task
+		if err := rows.Scan(&t.ID, &t.ChannelID, &t.RepoID, &t.Kind, &t.Title, &t.Status, &t.Branch, &t.WorktreePath, &t.SessionID, &t.BriefPath, &t.ReportPath, &t.CreatedAt, &t.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// DoneTasksWithWorktree returns done tasks whose worktree lease was never
+// returned (teardown interrupted, e.g. daemon restart).
+func (s *Store) DoneTasksWithWorktree() ([]Task, error) {
+	rows, err := s.db.Query(`SELECT id, channel_id, repo_id, kind, title, status, branch, worktree_path, session_id, brief_path, report_path, created_at, updated_at
+		FROM tasks WHERE status = 'done' AND worktree_path != ''`)
 	if err != nil {
 		return nil, err
 	}

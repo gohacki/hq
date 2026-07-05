@@ -271,6 +271,8 @@ func (o *Orch) classifyTurnEnd(t *store.Task, ch store.Channel, ev agent.Event, 
 		o.d.NotifyNeedsInput(rpc.NeedsInput{ChannelID: t.ChannelID, TaskID: t.ID, Reason: reason, Summary: t.Title})
 	case store.TaskDone:
 		o.d.NotifyNeedsInput(rpc.NeedsInput{ChannelID: t.ChannelID, TaskID: t.ID, Reason: "done", Summary: t.Title})
+		o.dropCrew(t.ID)
+		go o.teardown(*t)
 	}
 }
 

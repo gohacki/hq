@@ -83,7 +83,7 @@ func (d *Daemon) ensureHomeChannel() error {
 	if err != store.ErrNotFound {
 		return err
 	}
-	_, err = d.createChannel(HomeChannelName, nil, "local-only")
+	_, err = d.CreateChannel(HomeChannelName, nil, "local-only", "none")
 	return err
 }
 
@@ -128,7 +128,9 @@ var channelNameOK = func(name string) bool {
 	return true
 }
 
-func (d *Daemon) createChannel(name string, repoPaths []string, delivery string) (store.Channel, error) {
+// CreateChannel registers a channel with its repos; verify controls the
+// manual-verification handback stage for ship tasks.
+func (d *Daemon) CreateChannel(name string, repoPaths []string, delivery, verify string) (store.Channel, error) {
 	if !channelNameOK(name) {
 		return store.Channel{}, fmt.Errorf("invalid channel name %q (lowercase, digits, - _)", name)
 	}
@@ -139,6 +141,14 @@ func (d *Daemon) createChannel(name string, repoPaths []string, delivery string)
 	case "no-mistakes", "direct-pr", "local-only":
 	default:
 		return store.Channel{}, fmt.Errorf("invalid delivery mode %q", delivery)
+	}
+	if verify == "" {
+		verify = "on-completion"
+	}
+	switch verify {
+	case "none", "before-delivery", "on-completion":
+	default:
+		return store.Channel{}, fmt.Errorf("invalid verify mode %q (none | before-delivery | on-completion)", verify)
 	}
 	dir := d.Paths.ChannelDir(name)
 	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
@@ -155,6 +165,7 @@ func (d *Daemon) createChannel(name string, repoPaths []string, delivery string)
 		ID:               store.NewID("ch"),
 		Name:             name,
 		Delivery:         delivery,
+		Verify:           verify,
 		InstructionsPath: instructions,
 	}
 	if err := d.Store.CreateChannel(ch); err != nil {
@@ -280,11 +291,12 @@ func (d *Daemon) registerHandlers() {
 			Name     string   `json:"name"`
 			Repos    []string `json:"repos"`
 			Delivery string   `json:"delivery"`
+			Verify   string   `json:"verify"`
 		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		return d.createChannel(p.Name, p.Repos, p.Delivery)
+		return d.CreateChannel(p.Name, p.Repos, p.Delivery, p.Verify)
 	})
 
 	d.Server.Handle("messages.list", func(ctx context.Context, raw json.RawMessage) (any, error) {

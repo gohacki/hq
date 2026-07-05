@@ -63,6 +63,7 @@ func (o *Orch) CaptainThreadMessage(ctx context.Context, t store.Task, body stri
 // Reconcile runs at daemon boot: live agent processes did not survive the
 // restart, so park every previously-active task until the captain nudges it.
 func (o *Orch) Reconcile(ctx context.Context, tasks []store.Task) {
+	go o.sweepTeardowns()
 	for _, t := range tasks {
 		if t.Status == store.TaskQueued {
 			continue // never started; spawn picks it up when created again
@@ -227,6 +228,37 @@ func (o *Orch) writeLeadMCPConfig(ch store.Channel) (string, error) {
 
 func (o *Orch) registerHandlers() {
 	srv := o.d.Server
+
+	// Overrides the daemon's bare handler: after creating the channel, spawn
+	// a dev-runbook scout per repo so the instructions doc learns how local
+	// development works (dev servers, ports, parallel worktrees).
+	srv.Handle("channels.create", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			Name     string   `json:"name"`
+			Repos    []string `json:"repos"`
+			Delivery string   `json:"delivery"`
+			Verify   string   `json:"verify"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		ch, err := o.d.CreateChannel(p.Name, p.Repos, p.Delivery, p.Verify)
+		if err != nil {
+			return nil, err
+		}
+		repos, err := o.d.Store.ReposForChannel(ch.ID)
+		if err != nil {
+			return nil, err
+		}
+		bg := context.WithoutCancel(ctx)
+		for _, r := range repos {
+			if _, err := o.createTask(bg, ch.ID, r.Name, "scout",
+				"Map local development workflow ("+r.Name+")", runbookBrief(ch, r)); err != nil {
+				o.log.Error("runbook scout spawn failed", "repo", r.Name, "err", err)
+			}
+		}
+		return ch, nil
+	})
 
 	srv.Handle("task.create", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
