@@ -19,13 +19,33 @@ import (
 type Harness struct {
 	// Bin overrides the claude binary path (tests use a fake).
 	Bin string
-	// Model is the default model for all sessions ("" = claude's default).
-	// SHIPYARD_MODEL overrides it at daemon start (e.g. "sonnet" to run the
-	// whole fleet on a cheaper tier).
+	// Model is the fleet-wide default. Shipyard defaults to sonnet — cheap
+	// and fast; upgrade specific leads/crewmates on the fly with /model or
+	// by asking the lead. SHIPYARD_MODEL still overrides the default.
 	Model string
 }
 
-func New() *Harness { return &Harness{Bin: "claude", Model: os.Getenv("SHIPYARD_MODEL")} }
+// DefaultModel is what every agent runs on unless told otherwise.
+const DefaultModel = "sonnet"
+
+func New() *Harness {
+	model := os.Getenv("SHIPYARD_MODEL")
+	if model == "" {
+		model = DefaultModel
+	}
+	return &Harness{Bin: "claude", Model: model}
+}
+
+// ResolveModel maps friendly names to what the claude CLI accepts; sonnet,
+// opus, and haiku are native aliases.
+func ResolveModel(m string) string {
+	switch m {
+	case "fable":
+		return "claude-fable-5"
+	default:
+		return m
+	}
+}
 
 func (h *Harness) InteractiveCommand(sessionID string) []string {
 	return []string{h.Bin, "--resume", sessionID}
@@ -43,7 +63,7 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 		model = h.Model
 	}
 	if model != "" {
-		args = append(args, "--model", model)
+		args = append(args, "--model", ResolveModel(model))
 	}
 	if spec.SystemPrompt != "" {
 		args = append(args, "--append-system-prompt", spec.SystemPrompt)

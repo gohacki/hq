@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -78,6 +79,15 @@ func (o *Orch) Reconcile(ctx context.Context, tasks []store.Task) {
 	}
 }
 
+func modelOK(m string) bool {
+	switch m {
+	case "sonnet", "opus", "fable", "haiku":
+		return true
+	}
+	// Full model ids pass through (e.g. claude-sonnet-5).
+	return strings.HasPrefix(m, "claude-")
+}
+
 func (o *Orch) systemMessage(channelID, taskID, body string) {
 	if _, err := o.d.PostMessage(store.Message{
 		ChannelID: channelID, TaskID: taskID, Author: "system", Kind: "system", Body: body,
@@ -124,6 +134,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 		sysPrompt = homeSystemPrompt()
 	}
 	sess, err := o.harness.Start(ctx, agent.Spec{
+		Model:           ch.LeadModel,
 		WorkDir:         o.d.Paths.ChannelDir(ch.Name),
 		SystemPrompt:    sysPrompt,
 		Prompt:          prompt,
@@ -134,6 +145,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 	if err != nil && ch.LeadSessionID != "" {
 		// Stale session id (e.g. claude storage cleaned) — start fresh.
 		sess, err = o.harness.Start(ctx, agent.Spec{
+			Model:         ch.LeadModel,
 			WorkDir:       o.d.Paths.ChannelDir(ch.Name),
 			SystemPrompt:  sysPrompt,
 			Prompt:        prompt,
@@ -253,11 +265,85 @@ func (o *Orch) registerHandlers() {
 		bg := context.WithoutCancel(ctx)
 		for _, r := range repos {
 			if _, err := o.createTask(bg, ch.ID, r.Name, "scout",
-				"Map local development workflow ("+r.Name+")", runbookBrief(ch, r)); err != nil {
+				"Map local development workflow ("+r.Name+")", runbookBrief(ch, r), ""); err != nil {
 				o.log.Error("runbook scout spawn failed", "repo", r.Name, "err", err)
 			}
 		}
 		return ch, nil
+	})
+
+	// model.set changes an agent's model on the fly. Live sessions are
+	// dropped and resumed with the new model — same session id, no context
+	// lost. Scopes: task (that crewmate), lead (this channel's lead), crew
+	// (channel default for future crewmates).
+	srv.Handle("model.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ChannelID string `json:"channel_id"`
+			TaskID    string `json:"task_id"`
+			Scope     string `json:"scope"` // task | lead | crew
+			Model     string `json:"model"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if !modelOK(p.Model) {
+			return nil, fmt.Errorf("unknown model %q (sonnet | opus | fable | haiku)", p.Model)
+		}
+		switch p.Scope {
+		case "task":
+			t, err := o.d.Store.TaskByID(p.TaskID)
+			if err != nil {
+				return nil, err
+			}
+			if t.Status.Terminal() {
+				return nil, fmt.Errorf("task %s is %s", t.ID, t.Status)
+			}
+			wasLive := false
+			o.mu.Lock()
+			_, wasLive = o.crews[t.ID]
+			o.mu.Unlock()
+			t.Model = p.Model
+			// Park first so the supervisor's exit handler doesn't read the
+			// intentional kill as a crash.
+			if wasLive {
+				t.Status = store.TaskNeedsInput
+			}
+			if err := o.d.UpdateTask(t); err != nil {
+				return nil, err
+			}
+			o.dropCrew(t.ID)
+			o.systemMessage(t.ChannelID, t.ID, "crewmate model → "+p.Model)
+			if wasLive && t.SessionID != "" {
+				if err := o.sendToCrew(context.WithoutCancel(ctx), t,
+					"(your model was switched to "+p.Model+" — continue exactly where you left off)"); err != nil {
+					return nil, fmt.Errorf("model saved, but resume failed: %w", err)
+				}
+			}
+			return "task " + t.ID + " → " + p.Model, nil
+		case "lead":
+			ch, err := o.d.Store.ChannelByID(p.ChannelID)
+			if err != nil {
+				return nil, err
+			}
+			if err := o.d.Store.SetChannelLeadModel(ch.ID, p.Model); err != nil {
+				return nil, err
+			}
+			o.dropLead(ch.ID) // next message resumes the session on the new model
+			o.systemMessage(ch.ID, "", "lead model → "+p.Model)
+			return "#" + ch.Name + " lead → " + p.Model, nil
+		case "crew":
+			ch, err := o.d.Store.ChannelByID(p.ChannelID)
+			if err != nil {
+				return nil, err
+			}
+			if err := o.d.Store.SetChannelCrewModel(ch.ID, p.Model); err != nil {
+				return nil, err
+			}
+			o.systemMessage(ch.ID, "", "default crewmate model → "+p.Model+" (future tasks)")
+			return "#" + ch.Name + " crew default → " + p.Model, nil
+		default:
+			return nil, fmt.Errorf("scope must be task, lead, or crew")
+		}
 	})
 
 	srv.Handle("task.create", func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -267,11 +353,15 @@ func (o *Orch) registerHandlers() {
 			Kind      string `json:"kind"`
 			Title     string `json:"title"`
 			Brief     string `json:"brief"`
+			Model     string `json:"model"`
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		return o.createTask(context.WithoutCancel(ctx), p.ChannelID, p.Repo, p.Kind, p.Title, p.Brief)
+		if p.Model != "" && !modelOK(p.Model) {
+			return nil, fmt.Errorf("unknown model %q (sonnet | opus | fable | haiku)", p.Model)
+		}
+		return o.createTask(context.WithoutCancel(ctx), p.ChannelID, p.Repo, p.Kind, p.Title, p.Brief, p.Model)
 	})
 
 	srv.Handle("task.message", func(ctx context.Context, raw json.RawMessage) (any, error) {

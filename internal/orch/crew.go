@@ -20,7 +20,7 @@ type crewRun struct {
 
 // createTask is the whole deterministic crewmate birth: record → worktree
 // lease → brief on disk → headless agent in the worktree.
-func (o *Orch) createTask(ctx context.Context, channelID, repoName, kind, title, brief string) (store.Task, error) {
+func (o *Orch) createTask(ctx context.Context, channelID, repoName, kind, title, brief, model string) (store.Task, error) {
 	if kind != "ship" && kind != "scout" {
 		return store.Task{}, fmt.Errorf("kind must be ship or scout")
 	}
@@ -64,6 +64,7 @@ func (o *Orch) createTask(ctx context.Context, channelID, repoName, kind, title,
 		Kind:      kind,
 		Title:     title,
 		Status:    store.TaskQueued,
+		Model:     model,
 	}
 	taskDir := o.d.Paths.TaskDir(ch.Name, t.ID)
 	if err := os.MkdirAll(taskDir, 0o755); err != nil {
@@ -93,6 +94,18 @@ func (o *Orch) createTask(ctx context.Context, channelID, repoName, kind, title,
 	return t, nil
 }
 
+// taskModel resolves the model a crewmate runs on: per-task override, else
+// the channel's crew default, else the harness default.
+func (o *Orch) taskModel(t store.Task) string {
+	if t.Model != "" {
+		return t.Model
+	}
+	if ch, err := o.d.Store.ChannelByID(t.ChannelID); err == nil {
+		return ch.CrewModel
+	}
+	return ""
+}
+
 func (o *Orch) spawnCrew(ctx context.Context, ch store.Channel, t store.Task, repo store.Repo, prompt string) {
 	wt, err := worktree.Lease(repo.Path, "shipyard:"+t.ID)
 	if err != nil {
@@ -106,6 +119,7 @@ func (o *Orch) spawnCrew(ctx context.Context, ch store.Channel, t store.Task, re
 	}
 
 	sess, err := o.harness.Start(ctx, agent.Spec{
+		Model:      o.taskModel(t),
 		WorkDir:    wt,
 		Prompt:     prompt,
 		Autonomous: true, // isolated worktree; matches firstmate's crewmate model
@@ -142,6 +156,7 @@ func (o *Orch) sendToCrew(ctx context.Context, t store.Task, body string) error 
 		return fmt.Errorf("crewmate has no worktree")
 	}
 	sess, err := o.harness.Start(ctx, agent.Spec{
+		Model:           o.taskModel(t),
 		WorkDir:         t.WorktreePath,
 		Prompt:          body,
 		ResumeSessionID: t.SessionID,
@@ -331,7 +346,7 @@ The scout's full report follows — it is your primary context.
 ---
 
 %s`, scout.ID, scout.Title, proposal, string(report))
-	return o.createTask(ctx, scout.ChannelID, repoName, "ship", proposal, brief)
+	return o.createTask(ctx, scout.ChannelID, repoName, "ship", proposal, brief, "")
 }
 
 // ProposedTasks extracts the "## Proposed tasks" bullets from a scout report.

@@ -29,6 +29,10 @@ Hard rules:
   Every code change or investigation goes through a crewmate task.
 - Keep replies short and Slack-like. No headers, no ceremony.
 - Do not invent task status; use list_tasks.
+- The whole fleet defaults to sonnet (cheap, fast). When the captain asks to
+  upgrade/downgrade you or a crewmate (opus, fable, haiku), or a task is
+  genuinely hard, use set_model / create_task's model param. Model switches
+  resume the same session — nothing is lost.
 - Delivery mode for this channel: %s. Verification mode: %s — crewmates hand
   finished work back to the captain with manual test instructions at that
   stage; when relaying, make sure the captain sees the test instructions.`, ch.Name, ch.Delivery, ch.Verify)

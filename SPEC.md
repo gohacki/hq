@@ -42,6 +42,12 @@ Channel settings (editable later):
   included), ending in a question. `STATUS: done` — and worktree teardown —
   only after the captain signs off.
 - `instructions`: path to the channel instructions doc
+- models: the whole fleet defaults to **sonnet**. Upgrade/downgrade on the
+  fly — `/model opus` in the composer (channel = lead, thread = that
+  crewmate; `/model crew <m>` sets the channel default for future
+  crewmates), or just tell the lead ("upgrade yourself to fable") — it has a
+  `set_model` tool, and `create_task` takes a per-task model. Switches
+  resume the same session with a different `--model`, so no context is lost.
 
 Channel creation also auto-spawns a **dev-runbook scout** per repo: it
 investigates how local development works (deps, tests, dev server command)

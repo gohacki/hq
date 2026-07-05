@@ -254,6 +254,9 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.composer.Reset()
+			if strings.HasPrefix(body, "/model") {
+				return m, m.modelCommand(strings.Fields(body)[1:])
+			}
 			return m, m.send(body)
 		case "shift+enter", "alt+enter":
 			m.composer.SetValue(m.composer.Value() + "\n")
@@ -365,6 +368,68 @@ func (m *model) escapeHatch() (tea.Model, tea.Cmd) {
 			return errMsg{err}
 		}
 		return errMsg{fmt.Errorf("opened tmux window %s", win)} // status line, not an error state
+	}
+}
+
+// modelCommand implements the composer's /model command:
+//
+//	/model              show current models for this scope
+//	/model opus         thread open → that crewmate; channel → the lead
+//	/model crew sonnet  channel's default for future crewmates
+func (m *model) modelCommand(args []string) tea.Cmd {
+	var cur daemon.ChannelView
+	for _, ch := range m.channels {
+		if ch.ID == m.openChan {
+			cur = ch
+		}
+	}
+	show := func(s string) tea.Cmd {
+		m.status = s
+		return nil
+	}
+	orDefault := func(s string) string {
+		if s == "" {
+			return "sonnet (default)"
+		}
+		return s
+	}
+	if len(args) == 0 {
+		if m.openThread != "" {
+			for _, t := range m.tasks {
+				if t.ID == m.openThread {
+					return show(fmt.Sprintf("crewmate model: %s · /model <sonnet|opus|fable|haiku> to switch", orDefault(t.Model)))
+				}
+			}
+		}
+		return show(fmt.Sprintf("lead: %s · crew default: %s · /model <m> = lead, /model crew <m> = crew default",
+			orDefault(cur.LeadModel), orDefault(cur.CrewModel)))
+	}
+	scope, modelName := "", ""
+	switch {
+	case len(args) == 1:
+		modelName = args[0]
+		if m.openThread != "" {
+			scope = "task"
+		} else {
+			scope = "lead"
+		}
+	case args[0] == "crew":
+		scope, modelName = "crew", args[1]
+	case args[0] == "lead":
+		scope, modelName = "lead", args[1]
+	default:
+		return show("usage: /model [crew|lead] <sonnet|opus|fable|haiku>")
+	}
+	params := map[string]any{"channel_id": m.openChan, "scope": scope, "model": modelName}
+	if scope == "task" {
+		params["task_id"] = m.openThread
+	}
+	return func() tea.Msg {
+		var out string
+		if err := m.cl.Call("model.set", params, &out); err != nil {
+			return errMsg{err}
+		}
+		return errMsg{fmt.Errorf("%s", out)} // status line
 	}
 }
 
@@ -593,6 +658,9 @@ func (m *model) headerView() string {
 		for _, t := range m.tasks {
 			if t.ID == m.openThread {
 				name += fmt.Sprintf("  ›  🧵 %s [%s]", t.Title, t.Status)
+				if t.Model != "" {
+					name += " · " + t.Model
+				}
 			}
 		}
 	}

@@ -61,14 +61,41 @@ func leadTools(cl *rpc.Client, channelID string, home bool) []mcp.Tool {
 				"kind":  map[string]any{"type": "string", "enum": []string{"ship", "scout"}},
 				"title": str("short imperative title"),
 				"brief": str("full task brief (markdown)"),
+				"model": map[string]any{"type": "string", "enum": []string{"sonnet", "opus", "fable", "haiku"}, "description": "model for this crewmate (default: channel crew model, normally sonnet). Upgrade for genuinely hard tasks."},
 			}, "kind", "title", "brief"),
 			Run: func(a json.RawMessage) (string, error) {
-				var p struct{ Repo, Kind, Title, Brief string }
+				var p struct{ Repo, Kind, Title, Brief, Model string }
 				if err := json.Unmarshal(a, &p); err != nil {
 					return "", err
 				}
 				return call("task.create", map[string]any{
-					"channel_id": channelID, "repo": p.Repo, "kind": p.Kind, "title": p.Title, "brief": p.Brief,
+					"channel_id": channelID, "repo": p.Repo, "kind": p.Kind, "title": p.Title, "brief": p.Brief, "model": p.Model,
+				})
+			},
+		},
+		{
+			Name:        "set_model",
+			Description: "Change an agent's model on the fly (session resumes with full context). scope=self upgrades/downgrades you (takes effect next turn), scope=task switches a live crewmate, scope=crew sets this channel's default for future crewmates. Models: sonnet (default, cheap) | opus | fable (strongest) | haiku (fastest).",
+			InputSchema: obj(map[string]any{
+				"scope":   map[string]any{"type": "string", "enum": []string{"self", "task", "crew"}},
+				"task_id": str("required when scope=task"),
+				"model":   map[string]any{"type": "string", "enum": []string{"sonnet", "opus", "fable", "haiku"}},
+			}, "scope", "model"),
+			Run: func(a json.RawMessage) (string, error) {
+				var p struct {
+					Scope  string `json:"scope"`
+					TaskID string `json:"task_id"`
+					Model  string `json:"model"`
+				}
+				if err := json.Unmarshal(a, &p); err != nil {
+					return "", err
+				}
+				scope := p.Scope
+				if scope == "self" {
+					scope = "lead"
+				}
+				return call("model.set", map[string]any{
+					"channel_id": channelID, "task_id": p.TaskID, "scope": scope, "model": p.Model,
 				})
 			},
 		},
