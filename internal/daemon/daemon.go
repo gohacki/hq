@@ -1,4 +1,4 @@
-// Package daemon is shipyard's long-lived core: sole owner of the store,
+// Package daemon is hq's long-lived core: sole owner of the store,
 // spawner/supervisor of agent processes, and RPC server for TUI clients.
 package daemon
 
@@ -12,22 +12,22 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/gohacki/shipyard/internal/config"
-	"github.com/gohacki/shipyard/internal/rpc"
-	"github.com/gohacki/shipyard/internal/store"
+	"github.com/gohacki/hq/internal/config"
+	"github.com/gohacki/hq/internal/rpc"
+	"github.com/gohacki/hq/internal/store"
 )
 
-// Orchestrator is the judgment layer: it decides how captain messages reach
-// agents. The daemon core stays deterministic and testable behind it.
+// Orchestrator is the judgment layer: it decides how the boss's messages
+// reach agents. The daemon core stays deterministic and testable behind it.
 type Orchestrator interface {
-	// CaptainChannelMessage handles a captain message in a channel's main
-	// scroll (routes to the channel's lead agent, or the home assistant).
-	CaptainChannelMessage(ctx context.Context, ch store.Channel, body string)
-	// CaptainThreadMessage handles a captain reply inside a task thread
-	// (steers the crewmate).
-	CaptainThreadMessage(ctx context.Context, t store.Task, body string)
-	// Reconcile is called at boot with all non-terminal tasks.
-	Reconcile(ctx context.Context, tasks []store.Task)
+	// BossProjectMessage handles a boss message in a project's main scroll
+	// (routes to the project's EM, or the PM in the conference room).
+	BossProjectMessage(ctx context.Context, p store.Project, body string)
+	// BossTicketMessage handles a boss reply inside a ticket thread (steers
+	// the engineer).
+	BossTicketMessage(ctx context.Context, t store.Ticket, body string)
+	// Reconcile is called at boot with all non-terminal tickets.
+	Reconcile(ctx context.Context, tickets []store.Ticket)
 }
 
 type Daemon struct {
@@ -57,11 +57,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer os.Remove(d.Paths.PIDPath())
-	if err := d.ensureHomeChannel(); err != nil {
+	if err := d.ensureConferenceRoom(); err != nil {
 		return err
 	}
 	if d.Orch != nil {
-		active, err := d.Store.ActiveTasks()
+		active, err := d.Store.ActiveTickets()
 		if err != nil {
 			return err
 		}
@@ -71,24 +71,24 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.Server.Serve(ctx)
 }
 
-// HomeChannelName is the built-in channel where the home assistant lives
-// (channel creation wizard, cross-channel questions).
-const HomeChannelName = "home"
+// ConferenceRoomName is the built-in project where the PM lives: project
+// intake, cross-project questions.
+const ConferenceRoomName = "conference-room"
 
-func (d *Daemon) ensureHomeChannel() error {
-	_, err := d.Store.ChannelByName(HomeChannelName)
+func (d *Daemon) ensureConferenceRoom() error {
+	_, err := d.Store.ProjectByName(ConferenceRoomName)
 	if err == nil {
 		return nil
 	}
 	if err != store.ErrNotFound {
 		return err
 	}
-	_, err = d.CreateChannel(HomeChannelName, nil, "local-only", "none")
+	_, err = d.CreateProject(ConferenceRoomName, nil, "local-only", "none")
 	return err
 }
 
 // PostMessage appends a message and publishes it to subscribers. It is the
-// single choke point every message (captain, lead, crew, system) goes through.
+// single choke point every message (boss, pm, em, eng, system) goes through.
 func (d *Daemon) PostMessage(m store.Message) (store.Message, error) {
 	id, err := d.Store.AppendMessage(m)
 	if err != nil {
@@ -99,24 +99,53 @@ func (d *Daemon) PostMessage(m store.Message) (store.Message, error) {
 	return m, nil
 }
 
-// UpdateTask persists a task change and publishes it.
-func (d *Daemon) UpdateTask(t store.Task) error {
-	if err := d.Store.UpdateTask(t); err != nil {
+// UpdateTicket persists a ticket change, publishes it, and auto-resolves any
+// office items that were waiting on the ticket once it leaves waiting states.
+func (d *Daemon) UpdateTicket(t store.Ticket) error {
+	if err := d.Store.UpdateTicket(t); err != nil {
 		return err
 	}
-	d.Server.Publish(rpc.EvTaskUpdated, t)
+	d.Server.Publish(rpc.EvTicketUpdated, t)
+	if t.Status == store.TicketRunning || t.Status == store.TicketDelivering {
+		ids, err := d.Store.ResolveTicketItems(t.ID)
+		if err != nil {
+			d.Log.Error("auto-resolve items", "err", err)
+		}
+		for _, id := range ids {
+			if it, err := d.Store.ItemByID(id); err == nil {
+				d.Server.Publish(rpc.EvItemResolved, it)
+			}
+		}
+	}
 	return nil
 }
 
-// NotifyNeedsInput records that a thread needs the captain and publishes the
-// signal (TUI turns it into badges + bell + desktop notification).
-func (d *Daemon) NotifyNeedsInput(n rpc.NeedsInput) {
-	d.Server.Publish(rpc.EvNeedsInput, n)
+// FileItem creates an attention item in My Office and publishes it. The
+// caller picks kind + tier per the interruption model: blocking question /
+// plan review / failed = interrupt; demo / handbook proposal = break.
+func (d *Daemon) FileItem(it store.Item) (store.Item, error) {
+	it, err := d.Store.CreateItem(it)
+	if err != nil {
+		return it, err
+	}
+	d.Server.Publish(rpc.EvItemNew, it)
+	return it, nil
 }
 
-// --- channel creation ---
+// ResolveItem marks an office item handled and publishes the resolution.
+func (d *Daemon) ResolveItem(id string) error {
+	if err := d.Store.ResolveItem(id); err != nil {
+		return err
+	}
+	if it, err := d.Store.ItemByID(id); err == nil {
+		d.Server.Publish(rpc.EvItemResolved, it)
+	}
+	return nil
+}
 
-var channelNameOK = func(name string) bool {
+// --- project creation ---
+
+var projectNameOK = func(name string) bool {
 	if name == "" || len(name) > 40 {
 		return false
 	}
@@ -128,11 +157,11 @@ var channelNameOK = func(name string) bool {
 	return true
 }
 
-// CreateChannel registers a channel with its repos; verify controls the
-// manual-verification handback stage for ship tasks.
-func (d *Daemon) CreateChannel(name string, repoPaths []string, delivery, verify string) (store.Channel, error) {
-	if !channelNameOK(name) {
-		return store.Channel{}, fmt.Errorf("invalid channel name %q (lowercase, digits, - _)", name)
+// CreateProject registers a project with its repos; verify controls the
+// manual-verification (demo) stage for build tickets.
+func (d *Daemon) CreateProject(name string, repoPaths []string, delivery, verify string) (store.Project, error) {
+	if !projectNameOK(name) {
+		return store.Project{}, fmt.Errorf("invalid project name %q (lowercase, digits, - _)", name)
 	}
 	if delivery == "" {
 		delivery = "no-mistakes"
@@ -140,7 +169,7 @@ func (d *Daemon) CreateChannel(name string, repoPaths []string, delivery, verify
 	switch delivery {
 	case "no-mistakes", "direct-pr", "local-only":
 	default:
-		return store.Channel{}, fmt.Errorf("invalid delivery mode %q", delivery)
+		return store.Project{}, fmt.Errorf("invalid delivery mode %q", delivery)
 	}
 	if verify == "" {
 		verify = "on-completion"
@@ -148,41 +177,41 @@ func (d *Daemon) CreateChannel(name string, repoPaths []string, delivery, verify
 	switch verify {
 	case "none", "before-delivery", "on-completion":
 	default:
-		return store.Channel{}, fmt.Errorf("invalid verify mode %q (none | before-delivery | on-completion)", verify)
+		return store.Project{}, fmt.Errorf("invalid verify mode %q (none | before-delivery | on-completion)", verify)
 	}
-	dir := d.Paths.ChannelDir(name)
-	if err := os.MkdirAll(filepath.Join(dir, "tasks"), 0o755); err != nil {
-		return store.Channel{}, err
+	dir := d.Paths.ProjectDir(name)
+	if err := os.MkdirAll(filepath.Join(dir, "tickets"), 0o755); err != nil {
+		return store.Project{}, err
 	}
-	instructions := filepath.Join(dir, "instructions.md")
-	if _, err := os.Stat(instructions); os.IsNotExist(err) {
-		seed := fmt.Sprintf("# #%s — channel instructions\n\nConventions, goals, and constraints for this project. Injected into the lead's and every crewmate's context.\n", name)
-		if err := os.WriteFile(instructions, []byte(seed), 0o644); err != nil {
-			return store.Channel{}, err
+	handbook := filepath.Join(dir, "handbook.md")
+	if _, err := os.Stat(handbook); os.IsNotExist(err) {
+		seed := fmt.Sprintf("# %s — team handbook\n\nConventions, goals, and constraints for this project. Injected into the EM's and every engineer's context.\n", name)
+		if err := os.WriteFile(handbook, []byte(seed), 0o644); err != nil {
+			return store.Project{}, err
 		}
 	}
-	ch := store.Channel{
-		ID:               store.NewID("ch"),
-		Name:             name,
-		Delivery:         delivery,
-		Verify:           verify,
-		InstructionsPath: instructions,
+	p := store.Project{
+		ID:           store.NewID("prj"),
+		Name:         name,
+		Delivery:     delivery,
+		Verify:       verify,
+		HandbookPath: handbook,
 	}
-	if err := d.Store.CreateChannel(ch); err != nil {
-		return store.Channel{}, err
+	if err := d.Store.CreateProject(p); err != nil {
+		return store.Project{}, err
 	}
 	for _, rp := range repoPaths {
-		if _, err := d.addRepo(ch, rp); err != nil {
-			return store.Channel{}, fmt.Errorf("repo %s: %w", rp, err)
+		if _, err := d.addRepo(p, rp); err != nil {
+			return store.Project{}, fmt.Errorf("repo %s: %w", rp, err)
 		}
 	}
-	d.Server.Publish(rpc.EvChannelCreated, ch)
-	return ch, nil
+	d.Server.Publish(rpc.EvProjectCreated, p)
+	return p, nil
 }
 
-// addRepo registers a local repo with a channel and makes sure it has a
-// treehouse pool config so crewmate worktrees can be leased from it.
-func (d *Daemon) addRepo(ch store.Channel, path string) (store.Repo, error) {
+// addRepo registers a local repo with a project and makes sure it has a
+// treehouse pool config so engineer worktrees can be leased from it.
+func (d *Daemon) addRepo(p store.Project, path string) (store.Repo, error) {
 	abs, err := filepath.Abs(expandHome(path))
 	if err != nil {
 		return store.Repo{}, err
@@ -193,7 +222,7 @@ func (d *Daemon) addRepo(ch store.Channel, path string) (store.Repo, error) {
 	branch := gitDefaultBranch(abs)
 	r := store.Repo{
 		ID:            store.NewID("repo"),
-		ChannelID:     ch.ID,
+		ProjectID:     p.ID,
 		Name:          filepath.Base(abs),
 		Path:          abs,
 		DefaultBranch: branch,
@@ -248,17 +277,18 @@ func unmarshal[T any](raw json.RawMessage) (T, error) {
 	return v, err
 }
 
-// ChannelView is a channel plus derived UI state.
-type ChannelView struct {
-	store.Channel
+// ProjectView is a project plus derived UI state.
+type ProjectView struct {
+	store.Project
 	Unread int          `json:"unread"`
 	Repos  []store.Repo `json:"repos"`
 }
 
-// TaskView is a task plus derived UI state.
-type TaskView struct {
-	store.Task
-	Unread int `json:"unread"`
+// TicketView is a ticket plus derived UI state.
+type TicketView struct {
+	store.Ticket
+	Unread  int    `json:"unread"`
+	Project string `json:"project"` // project name (board/office rendering)
 }
 
 func (d *Daemon) registerHandlers() {
@@ -266,27 +296,27 @@ func (d *Daemon) registerHandlers() {
 		return "pong", nil
 	})
 
-	d.Server.Handle("channels.list", func(ctx context.Context, _ json.RawMessage) (any, error) {
-		chs, err := d.Store.Channels()
+	d.Server.Handle("projects.list", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		prjs, err := d.Store.Projects()
 		if err != nil {
 			return nil, err
 		}
-		out := make([]ChannelView, 0, len(chs))
-		for _, c := range chs {
-			unread, err := d.Store.UnreadCount(c.ID, "")
+		out := make([]ProjectView, 0, len(prjs))
+		for _, p := range prjs {
+			unread, err := d.Store.UnreadCount(p.ID, "")
 			if err != nil {
 				return nil, err
 			}
-			repos, err := d.Store.ReposForChannel(c.ID)
+			repos, err := d.Store.ReposForProject(p.ID)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, ChannelView{Channel: c, Unread: unread, Repos: repos})
+			out = append(out, ProjectView{Project: p, Unread: unread, Repos: repos})
 		}
 		return out, nil
 	})
 
-	d.Server.Handle("channels.create", func(ctx context.Context, raw json.RawMessage) (any, error) {
+	d.Server.Handle("projects.create", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
 			Name     string   `json:"name"`
 			Repos    []string `json:"repos"`
@@ -296,47 +326,58 @@ func (d *Daemon) registerHandlers() {
 		if err != nil {
 			return nil, err
 		}
-		return d.CreateChannel(p.Name, p.Repos, p.Delivery, p.Verify)
+		return d.CreateProject(p.Name, p.Repos, p.Delivery, p.Verify)
 	})
 
 	d.Server.Handle("messages.list", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ChannelID string `json:"channel_id"`
-			TaskID    string `json:"task_id"`
+			ProjectID string `json:"project_id"`
+			TicketID  string `json:"ticket_id"`
 			Limit     int    `json:"limit"`
 		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		return d.Store.Messages(p.ChannelID, p.TaskID, p.Limit)
+		return d.Store.Messages(p.ProjectID, p.TicketID, p.Limit)
 	})
 
-	d.Server.Handle("tasks.list", func(ctx context.Context, raw json.RawMessage) (any, error) {
+	d.Server.Handle("tickets.list", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ChannelID string `json:"channel_id"`
+			ProjectID string `json:"project_id"` // "" = all projects (board / PM)
 		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		tasks, err := d.Store.TasksForChannel(p.ChannelID)
+		var tickets []store.Ticket
+		if p.ProjectID == "" {
+			tickets, err = d.Store.AllTickets()
+		} else {
+			tickets, err = d.Store.TicketsForProject(p.ProjectID)
+		}
 		if err != nil {
 			return nil, err
 		}
-		out := make([]TaskView, 0, len(tasks))
-		for _, t := range tasks {
-			unread, err := d.Store.UnreadCount(t.ChannelID, t.ID)
+		names := map[string]string{}
+		if prjs, err := d.Store.Projects(); err == nil {
+			for _, pr := range prjs {
+				names[pr.ID] = pr.Name
+			}
+		}
+		out := make([]TicketView, 0, len(tickets))
+		for _, t := range tickets {
+			unread, err := d.Store.UnreadCount(t.ProjectID, t.ID)
 			if err != nil {
 				return nil, err
 			}
-			out = append(out, TaskView{Task: t, Unread: unread})
+			out = append(out, TicketView{Ticket: t, Unread: unread, Project: names[t.ProjectID]})
 		}
 		return out, nil
 	})
 
 	d.Server.Handle("message.send", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ChannelID string `json:"channel_id"`
-			TaskID    string `json:"task_id"`
+			ProjectID string `json:"project_id"`
+			TicketID  string `json:"ticket_id"`
 			Body      string `json:"body"`
 		}](raw)
 		if err != nil {
@@ -345,25 +386,25 @@ func (d *Daemon) registerHandlers() {
 		if strings.TrimSpace(p.Body) == "" {
 			return nil, fmt.Errorf("empty message")
 		}
-		ch, err := d.Store.ChannelByID(p.ChannelID)
+		prj, err := d.Store.ProjectByID(p.ProjectID)
 		if err != nil {
 			return nil, err
 		}
 		m, err := d.PostMessage(store.Message{
-			ChannelID: p.ChannelID, TaskID: p.TaskID, Author: "captain", Body: p.Body,
+			ProjectID: p.ProjectID, TicketID: p.TicketID, Author: "boss", Body: p.Body,
 		})
 		if err != nil {
 			return nil, err
 		}
 		if d.Orch != nil {
-			if p.TaskID == "" {
-				go d.Orch.CaptainChannelMessage(context.WithoutCancel(ctx), ch, p.Body)
+			if p.TicketID == "" {
+				go d.Orch.BossProjectMessage(context.WithoutCancel(ctx), prj, p.Body)
 			} else {
-				t, err := d.Store.TaskByID(p.TaskID)
+				t, err := d.Store.TicketByID(p.TicketID)
 				if err != nil {
 					return nil, err
 				}
-				go d.Orch.CaptainThreadMessage(context.WithoutCancel(ctx), t, p.Body)
+				go d.Orch.BossTicketMessage(context.WithoutCancel(ctx), t, p.Body)
 			}
 		}
 		return m, nil
@@ -371,31 +412,64 @@ func (d *Daemon) registerHandlers() {
 
 	d.Server.Handle("reads.mark", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ChannelID string `json:"channel_id"`
-			TaskID    string `json:"task_id"`
+			ProjectID string `json:"project_id"`
+			TicketID  string `json:"ticket_id"`
 			LastID    int64  `json:"last_id"`
 		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		return nil, d.Store.MarkRead(p.ChannelID, p.TaskID, p.LastID)
+		return nil, d.Store.MarkRead(p.ProjectID, p.TicketID, p.LastID)
 	})
 
-	d.Server.Handle("instructions.get", func(ctx context.Context, raw json.RawMessage) (any, error) {
+	d.Server.Handle("items.list", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return d.Store.OpenItems()
+	})
+
+	d.Server.Handle("item.resolve", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ChannelID string `json:"channel_id"`
+			ID string `json:"id"`
 		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		ch, err := d.Store.ChannelByID(p.ChannelID)
+		return "resolved", d.ResolveItem(p.ID)
+	})
+
+	d.Server.Handle("presence.get", func(ctx context.Context, _ json.RawMessage) (any, error) {
+		return d.Store.GetSetting("presence", "available")
+	})
+
+	d.Server.Handle("presence.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		p, err := unmarshal[struct {
+			Mode string `json:"mode"`
+		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		b, err := os.ReadFile(ch.InstructionsPath)
+		switch p.Mode {
+		case "heads-down", "available", "review":
+		default:
+			return nil, fmt.Errorf("mode must be heads-down | available | review")
+		}
+		return p.Mode, d.Store.SetSetting("presence", p.Mode)
+	})
+
+	d.Server.Handle("handbook.get", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		p, err := unmarshal[struct {
+			ProjectID string `json:"project_id"`
+		}](raw)
 		if err != nil {
 			return nil, err
 		}
-		return map[string]string{"path": ch.InstructionsPath, "body": string(b)}, nil
+		prj, err := d.Store.ProjectByID(p.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		b, err := os.ReadFile(prj.HandbookPath)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]string{"path": prj.HandbookPath, "body": string(b)}, nil
 	})
 }

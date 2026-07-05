@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gohacki/shipyard/internal/config"
-	"github.com/gohacki/shipyard/internal/rpc"
-	"github.com/gohacki/shipyard/internal/store"
+	"github.com/gohacki/hq/internal/config"
+	"github.com/gohacki/hq/internal/rpc"
+	"github.com/gohacki/hq/internal/store"
 )
 
 // bootDaemon starts a daemon on temp paths with no orchestrator and returns a
@@ -62,69 +62,63 @@ func makeGitRepo(t *testing.T) string {
 }
 
 func TestDaemonEndToEnd(t *testing.T) {
-	_, cl := bootDaemon(t)
+	d, cl := bootDaemon(t)
 
 	var pong string
 	if err := cl.Call("ping", nil, &pong); err != nil || pong != "pong" {
 		t.Fatalf("ping: %v %q", err, pong)
 	}
 
-	// home channel exists at boot
-	var chs []ChannelView
-	if err := cl.Call("channels.list", nil, &chs); err != nil {
+	// conference room exists at boot
+	var prjs []ProjectView
+	if err := cl.Call("projects.list", nil, &prjs); err != nil {
 		t.Fatal(err)
 	}
-	if len(chs) != 1 || chs[0].Name != HomeChannelName {
-		t.Fatalf("want [home], got %+v", chs)
+	if len(prjs) != 1 || prjs[0].Name != ConferenceRoomName {
+		t.Fatalf("want [conference-room], got %+v", prjs)
 	}
 
-	// create a channel spanning a real git repo
+	// create a project spanning a real git repo
 	repo := makeGitRepo(t)
-	var ch store.Channel
-	if err := cl.Call("channels.create", map[string]any{
+	var prj store.Project
+	if err := cl.Call("projects.create", map[string]any{
 		"name": "beta-os", "repos": []string{repo},
-	}, &ch); err != nil {
+	}, &prj); err != nil {
 		t.Fatal(err)
 	}
-	if ch.Delivery != "no-mistakes" {
-		t.Fatalf("default delivery: %q", ch.Delivery)
+	if prj.Delivery != "no-mistakes" || prj.Verify != "on-completion" {
+		t.Fatalf("defaults: %+v", prj)
 	}
-	if ch.Verify != "on-completion" {
-		t.Fatalf("default verify: %q", ch.Verify)
-	}
-	if err := cl.Call("channels.list", nil, &chs); err != nil {
+	if err := cl.Call("projects.list", nil, &prjs); err != nil {
 		t.Fatal(err)
 	}
-	if len(chs) != 2 {
-		t.Fatalf("want 2 channels, got %+v", chs)
+	if len(prjs) != 2 {
+		t.Fatalf("want 2 projects, got %+v", prjs)
 	}
-	for _, c := range chs {
-		if c.Name == "beta-os" && (len(c.Repos) != 1 || c.Repos[0].DefaultBranch != "main") {
-			t.Fatalf("repo registration wrong: %+v", c.Repos)
+	for _, p := range prjs {
+		if p.Name == "beta-os" && (len(p.Repos) != 1 || p.Repos[0].DefaultBranch != "main") {
+			t.Fatalf("repo registration wrong: %+v", p.Repos)
 		}
 	}
 
-	// instructions seeded and readable
-	var instr struct{ Path, Body string }
-	if err := cl.Call("instructions.get", map[string]any{"channel_id": ch.ID}, &instr); err != nil {
+	// handbook seeded and readable
+	var hb struct{ Path, Body string }
+	if err := cl.Call("handbook.get", map[string]any{"project_id": prj.ID}, &hb); err != nil {
 		t.Fatal(err)
 	}
-	if instr.Body == "" {
-		t.Fatal("instructions not seeded")
+	if hb.Body == "" {
+		t.Fatal("handbook not seeded")
 	}
 
 	// invalid inputs rejected
-	if err := cl.Call("channels.create", map[string]any{"name": "Bad Name!"}, nil); err == nil {
+	if err := cl.Call("projects.create", map[string]any{"name": "Bad Name!"}, nil); err == nil {
 		t.Fatal("want invalid-name error")
 	}
-	if err := cl.Call("channels.create", map[string]any{"name": "x", "delivery": "yolo"}, nil); err == nil {
+	if err := cl.Call("projects.create", map[string]any{"name": "x", "delivery": "yolo"}, nil); err == nil {
 		t.Fatal("want invalid-delivery error")
 	}
-	if err := cl.Call("channels.create", map[string]any{"name": "x", "verify": "sometimes"}, nil); err == nil {
+	if err := cl.Call("projects.create", map[string]any{"name": "x", "verify": "sometimes"}, nil); err == nil {
 		t.Fatal("want invalid-verify error")
-	}
-	if err := cl.Call("channels.create", map[string]any{"name": "y", "repos": []string{t.TempDir()}}, nil); err == nil {
-		t.Fatal("want not-a-git-repo error")
 	}
 
 	// message flow + events + unreads
@@ -132,7 +126,7 @@ func TestDaemonEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	var sent store.Message
-	if err := cl.Call("message.send", map[string]any{"channel_id": ch.ID, "body": "hello lead"}, &sent); err != nil {
+	if err := cl.Call("message.send", map[string]any{"project_id": prj.ID, "body": "hello em"}, &sent); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -143,14 +137,59 @@ func TestDaemonEndToEnd(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("no message.new event")
 	}
-	var msgs []store.Message
-	if err := cl.Call("messages.list", map[string]any{"channel_id": ch.ID}, &msgs); err != nil {
+
+	// items engine: file → list → resolve, with events
+	it, err := d.FileItem(store.Item{
+		Kind: store.ItemQuestion, Tier: store.TierInterrupt,
+		ProjectID: prj.ID, Title: "cap retries?",
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(msgs) != 1 || msgs[0].Author != "captain" {
-		t.Fatalf("messages: %+v", msgs)
+	select {
+	case ev := <-cl.Events():
+		if ev.Event != rpc.EvItemNew {
+			t.Fatalf("got event %q", ev.Event)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no item.new event")
 	}
-	if err := cl.Call("message.send", map[string]any{"channel_id": ch.ID, "body": "   "}, nil); err == nil {
-		t.Fatal("want empty-message error")
+	var items []store.Item
+	if err := cl.Call("items.list", nil, &items); err != nil || len(items) != 1 {
+		t.Fatalf("items.list: %v %+v", err, items)
+	}
+	if err := cl.Call("item.resolve", map[string]any{"id": it.ID}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Call("items.list", nil, &items); err != nil || len(items) != 0 {
+		t.Fatalf("after resolve: %v %+v", err, items)
+	}
+
+	// items auto-resolve when their ticket starts running again
+	if err := d.Store.CreateTicket(store.Ticket{ID: "tkt_x", ProjectID: prj.ID, Kind: "build", Title: "x", Status: store.TicketNeedsInput}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.FileItem(store.Item{Kind: store.ItemQuestion, Tier: store.TierInterrupt, ProjectID: prj.ID, TicketID: "tkt_x", Title: "q"}); err != nil {
+		t.Fatal(err)
+	}
+	tk, _ := d.Store.TicketByID("tkt_x")
+	tk.Status = store.TicketRunning
+	if err := d.UpdateTicket(tk); err != nil {
+		t.Fatal(err)
+	}
+	if err := cl.Call("items.list", nil, &items); err != nil || len(items) != 0 {
+		t.Fatalf("ticket items not auto-resolved: %v %+v", err, items)
+	}
+
+	// presence
+	var mode string
+	if err := cl.Call("presence.get", nil, &mode); err != nil || mode != "available" {
+		t.Fatalf("presence default: %v %q", err, mode)
+	}
+	if err := cl.Call("presence.set", map[string]any{"mode": "heads-down"}, &mode); err != nil || mode != "heads-down" {
+		t.Fatalf("presence.set: %v %q", err, mode)
+	}
+	if err := cl.Call("presence.set", map[string]any{"mode": "napping"}, nil); err == nil {
+		t.Fatal("want invalid-mode error")
 	}
 }

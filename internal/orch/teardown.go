@@ -4,37 +4,37 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/gohacki/shipyard/internal/store"
-	"github.com/gohacki/shipyard/internal/worktree"
+	"github.com/gohacki/hq/internal/store"
+	"github.com/gohacki/hq/internal/worktree"
 )
 
-// teardown returns a finished task's worktree to the treehouse pool —
-// fail-closed: the lease is kept (and the captain told why) unless the work
-// is provably landed. Branch refs live in the shared repo, so returning a
-// clean worktree never loses committed work on a branch.
-func (o *Orch) teardown(t store.Task) {
+// teardown returns a finished ticket's worktree to the treehouse pool —
+// fail-closed: the lease is kept (and the boss told why) unless the work is
+// provably landed. Branch refs live in the shared repo, so returning a clean
+// worktree never loses committed work on a branch.
+func (o *Orch) teardown(t store.Ticket) {
 	if t.WorktreePath == "" {
 		return
 	}
 	if reason := unlandedWork(t.WorktreePath); reason != "" {
-		o.systemMessage(t.ChannelID, t.ID, "worktree kept ("+reason+"): "+t.WorktreePath)
+		o.systemMessage(t.ProjectID, t.ID, "worktree kept ("+reason+"): "+t.WorktreePath)
 		return
 	}
 	if err := worktree.Return(t.WorktreePath); err != nil {
-		o.log.Error("worktree return failed", "task", t.ID, "err", err)
-		o.systemMessage(t.ChannelID, t.ID, "worktree return failed: "+err.Error())
+		o.log.Error("worktree return failed", "ticket", t.ID, "err", err)
+		o.systemMessage(t.ProjectID, t.ID, "worktree return failed: "+err.Error())
 		return
 	}
-	cur, err := o.d.Store.TaskByID(t.ID)
+	cur, err := o.d.Store.TicketByID(t.ID)
 	if err != nil {
-		o.log.Error("task lookup after teardown", "err", err)
+		o.log.Error("ticket lookup after teardown", "err", err)
 		return
 	}
 	cur.WorktreePath = ""
-	if err := o.d.UpdateTask(cur); err != nil {
-		o.log.Error("update task after teardown", "err", err)
+	if err := o.d.UpdateTicket(cur); err != nil {
+		o.log.Error("update ticket after teardown", "err", err)
 	}
-	o.systemMessage(t.ChannelID, t.ID, "worktree returned to pool")
+	o.systemMessage(t.ProjectID, t.ID, "worktree returned to pool")
 }
 
 // unlandedWork reports why a worktree is unsafe to return ("" = safe):
@@ -59,15 +59,15 @@ func unlandedWork(wt string) string {
 	return ""
 }
 
-// sweepTeardowns runs at boot: done tasks whose worktrees were never returned
-// (e.g. daemon died between classify and teardown).
+// sweepTeardowns runs at boot: done tickets whose worktrees were never
+// returned (e.g. daemon died between classify and teardown).
 func (o *Orch) sweepTeardowns() {
-	tasks, err := o.d.Store.DoneTasksWithWorktree()
+	tickets, err := o.d.Store.DoneTicketsWithWorktree()
 	if err != nil {
 		o.log.Error("teardown sweep query", "err", err)
 		return
 	}
-	for _, t := range tasks {
+	for _, t := range tickets {
 		o.teardown(t)
 	}
 }

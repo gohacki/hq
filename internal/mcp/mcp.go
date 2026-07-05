@@ -11,9 +11,9 @@ import (
 )
 
 type Tool struct {
-	Name        string         `json:"name"`
-	Description string         `json:"description"`
-	InputSchema map[string]any `json:"inputSchema"`
+	Name        string                                     `json:"name"`
+	Description string                                     `json:"description"`
+	InputSchema map[string]any                             `json:"inputSchema"`
 	Run         func(args json.RawMessage) (string, error) `json:"-"`
 }
 

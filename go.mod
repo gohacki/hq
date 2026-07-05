@@ -1,4 +1,4 @@
-module github.com/gohacki/shipyard
+module github.com/gohacki/hq
 
 go 1.26.4
 

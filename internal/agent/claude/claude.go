@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gohacki/shipyard/internal/agent"
+	"github.com/gohacki/hq/internal/agent"
 )
 
 type Harness struct {

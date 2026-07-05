@@ -1,12 +1,11 @@
-// Package store is shipyard's SQLite persistence layer. The daemon is the
-// only writer; the TUI reads via daemon RPC, never the database directly.
+// Package store is hq's SQLite persistence layer. The daemon is the only
+// writer; the TUI reads via daemon RPC, never the database directly.
 package store
 
 import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,29 +31,33 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 const schema = `
-CREATE TABLE IF NOT EXISTS channels (
-  id                TEXT PRIMARY KEY,
-  name              TEXT NOT NULL UNIQUE,
-  delivery          TEXT NOT NULL DEFAULT 'no-mistakes',
-  instructions_path TEXT NOT NULL DEFAULT '',
-  lead_session_id   TEXT NOT NULL DEFAULT '',
-  created_at        INTEGER NOT NULL
+CREATE TABLE IF NOT EXISTS projects (
+  id              TEXT PRIMARY KEY,
+  name            TEXT NOT NULL UNIQUE,
+  delivery        TEXT NOT NULL DEFAULT 'no-mistakes',
+  verify          TEXT NOT NULL DEFAULT 'on-completion',
+  em_model        TEXT NOT NULL DEFAULT '',
+  eng_model       TEXT NOT NULL DEFAULT '',
+  handbook_path   TEXT NOT NULL DEFAULT '',
+  em_session_id   TEXT NOT NULL DEFAULT '',
+  created_at      INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS repos (
   id             TEXT PRIMARY KEY,
-  channel_id     TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   name           TEXT NOT NULL,
   path           TEXT NOT NULL,
   default_branch TEXT NOT NULL DEFAULT 'main',
-  UNIQUE(channel_id, name)
+  UNIQUE(project_id, name)
 );
-CREATE TABLE IF NOT EXISTS tasks (
+CREATE TABLE IF NOT EXISTS tickets (
   id            TEXT PRIMARY KEY,
-  channel_id    TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+  project_id    TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
   repo_id       TEXT NOT NULL DEFAULT '',
-  kind          TEXT NOT NULL CHECK (kind IN ('ship','scout')),
+  kind          TEXT NOT NULL CHECK (kind IN ('build','spike')),
   title         TEXT NOT NULL,
   status        TEXT NOT NULL DEFAULT 'queued',
+  model         TEXT NOT NULL DEFAULT '',
   branch        TEXT NOT NULL DEFAULT '',
   worktree_path TEXT NOT NULL DEFAULT '',
   session_id    TEXT NOT NULL DEFAULT '',
@@ -65,124 +68,139 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE TABLE IF NOT EXISTS messages (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-  task_id    TEXT NOT NULL DEFAULT '',
-  author     TEXT NOT NULL,             -- 'captain' | 'lead' | 'crew:<task-id>' | 'system'
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  ticket_id  TEXT NOT NULL DEFAULT '',
+  author     TEXT NOT NULL,               -- 'boss' | 'pm' | 'em' | 'eng:<ticket-id>' | 'system'
   kind       TEXT NOT NULL DEFAULT 'text', -- text | report | gate | system
   body       TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_messages_scope ON messages(channel_id, task_id, id);
+CREATE INDEX IF NOT EXISTS idx_messages_scope ON messages(project_id, ticket_id, id);
 CREATE TABLE IF NOT EXISTS reads (
-  scope_id             TEXT PRIMARY KEY,  -- channel id, or channel:task for threads
+  scope_id             TEXT PRIMARY KEY,  -- project id, or project:ticket
   last_read_message_id INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS items (
+  id          TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,  -- question | options | demo | plan | blocked | failed | handbook
+  tier        TEXT NOT NULL,  -- interrupt | break
+  project_id  TEXT NOT NULL,
+  ticket_id   TEXT NOT NULL DEFAULT '',
+  ref_id      TEXT NOT NULL DEFAULT '',   -- plan id / handbook-proposal id when applicable
+  title       TEXT NOT NULL,
+  body        TEXT NOT NULL DEFAULT '',
+  options     TEXT NOT NULL DEFAULT '',   -- JSON array for kind=options
+  created_at  INTEGER NOT NULL,
+  resolved_at INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_items_open ON items(resolved_at, tier, created_at);
+CREATE TABLE IF NOT EXISTS plans (
+  id          TEXT PRIMARY KEY,
+  project_id  TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  doc_path    TEXT NOT NULL,
+  doc_md      TEXT NOT NULL,
+  tickets     TEXT NOT NULL,              -- JSON array of proposed tickets
+  questions   TEXT NOT NULL DEFAULT '',   -- JSON array of open questions
+  status      TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected
+  created_at  INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
 );
 `
 
 func (s *Store) migrate() error {
-	if _, err := s.db.Exec(schema); err != nil {
-		return err
-	}
-	// Additive column migrations; duplicate-column errors mean already applied.
-	for _, stmt := range []string{
-		`ALTER TABLE channels ADD COLUMN verify TEXT NOT NULL DEFAULT 'on-completion'`,
-		`ALTER TABLE channels ADD COLUMN lead_model TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE channels ADD COLUMN crew_model TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE tasks ADD COLUMN model TEXT NOT NULL DEFAULT ''`,
-	} {
-		if _, err := s.db.Exec(stmt); err != nil && !strings.Contains(err.Error(), "duplicate column") {
-			return err
-		}
-	}
-	return nil
+	_, err := s.db.Exec(schema)
+	return err
 }
 
 var ErrNotFound = errors.New("not found")
 
 func now() int64 { return time.Now().Unix() }
 
-// --- channels ---
+// --- projects ---
 
-type Channel struct {
-	ID               string
-	Name             string
-	Delivery         string
-	Verify           string // none | before-delivery | on-completion
-	LeadModel        string // "" = harness default (sonnet)
-	CrewModel        string // "" = harness default (sonnet)
-	InstructionsPath string
-	LeadSessionID    string
-	CreatedAt        int64
+type Project struct {
+	ID           string
+	Name         string
+	Delivery     string
+	Verify       string // none | before-delivery | on-completion
+	EMModel      string // "" = harness default (sonnet)
+	EngModel     string // "" = harness default (sonnet)
+	HandbookPath string
+	EMSessionID  string
+	CreatedAt    int64
 }
 
-func (s *Store) CreateChannel(c Channel) error {
-	c.CreatedAt = now()
-	if c.Verify == "" {
-		c.Verify = "on-completion"
+const projectCols = `id, name, delivery, verify, em_model, eng_model, handbook_path, em_session_id, created_at`
+
+func scanProject(row interface{ Scan(...any) error }) (Project, error) {
+	var p Project
+	err := row.Scan(&p.ID, &p.Name, &p.Delivery, &p.Verify, &p.EMModel, &p.EngModel, &p.HandbookPath, &p.EMSessionID, &p.CreatedAt)
+	return p, err
+}
+
+func (s *Store) CreateProject(p Project) error {
+	p.CreatedAt = now()
+	if p.Verify == "" {
+		p.Verify = "on-completion"
 	}
-	_, err := s.db.Exec(`INSERT INTO channels (id, name, delivery, verify, lead_model, crew_model, instructions_path, lead_session_id, created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
-		c.ID, c.Name, c.Delivery, c.Verify, c.LeadModel, c.CrewModel, c.InstructionsPath, c.LeadSessionID, c.CreatedAt)
+	_, err := s.db.Exec(`INSERT INTO projects (`+projectCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
+		p.ID, p.Name, p.Delivery, p.Verify, p.EMModel, p.EngModel, p.HandbookPath, p.EMSessionID, p.CreatedAt)
 	return err
 }
 
-const channelCols = `id, name, delivery, verify, lead_model, crew_model, instructions_path, lead_session_id, created_at`
-
-func scanChannel(row interface{ Scan(...any) error }) (Channel, error) {
-	var c Channel
-	err := row.Scan(&c.ID, &c.Name, &c.Delivery, &c.Verify, &c.LeadModel, &c.CrewModel, &c.InstructionsPath, &c.LeadSessionID, &c.CreatedAt)
-	return c, err
-}
-
-func (s *Store) SetChannelLeadModel(id, model string) error {
-	_, err := s.db.Exec(`UPDATE channels SET lead_model = ? WHERE id = ?`, model, id)
-	return err
-}
-
-func (s *Store) SetChannelCrewModel(id, model string) error {
-	_, err := s.db.Exec(`UPDATE channels SET crew_model = ? WHERE id = ?`, model, id)
-	return err
-}
-
-func (s *Store) Channels() ([]Channel, error) {
-	rows, err := s.db.Query(`SELECT ` + channelCols + ` FROM channels ORDER BY name`)
+func (s *Store) Projects() ([]Project, error) {
+	rows, err := s.db.Query(`SELECT ` + projectCols + ` FROM projects ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Channel
+	var out []Project
 	for rows.Next() {
-		c, err := scanChannel(rows)
+		p, err := scanProject(rows)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, c)
+		out = append(out, p)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) ChannelByName(name string) (Channel, error) {
-	c, err := scanChannel(s.db.QueryRow(`SELECT `+channelCols+` FROM channels WHERE name = ?`, name))
+func (s *Store) ProjectByName(name string) (Project, error) {
+	p, err := scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE name = ?`, name))
 	if errors.Is(err, sql.ErrNoRows) {
-		return c, ErrNotFound
+		return p, ErrNotFound
 	}
-	return c, err
+	return p, err
 }
 
-func (s *Store) ChannelByID(id string) (Channel, error) {
-	c, err := scanChannel(s.db.QueryRow(`SELECT `+channelCols+` FROM channels WHERE id = ?`, id))
+func (s *Store) ProjectByID(id string) (Project, error) {
+	p, err := scanProject(s.db.QueryRow(`SELECT `+projectCols+` FROM projects WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return c, ErrNotFound
+		return p, ErrNotFound
 	}
-	return c, err
+	return p, err
 }
 
-func (s *Store) SetChannelLeadSession(id, sessionID string) error {
-	_, err := s.db.Exec(`UPDATE channels SET lead_session_id = ? WHERE id = ?`, sessionID, id)
+func (s *Store) SetProjectEMSession(id, sessionID string) error {
+	_, err := s.db.Exec(`UPDATE projects SET em_session_id = ? WHERE id = ?`, sessionID, id)
 	return err
 }
 
-func (s *Store) SetChannelDelivery(id, delivery string) error {
-	_, err := s.db.Exec(`UPDATE channels SET delivery = ? WHERE id = ?`, delivery, id)
+func (s *Store) SetProjectDelivery(id, delivery string) error {
+	_, err := s.db.Exec(`UPDATE projects SET delivery = ? WHERE id = ?`, delivery, id)
+	return err
+}
+
+func (s *Store) SetProjectEMModel(id, model string) error {
+	_, err := s.db.Exec(`UPDATE projects SET em_model = ? WHERE id = ?`, model, id)
+	return err
+}
+
+func (s *Store) SetProjectEngModel(id, model string) error {
+	_, err := s.db.Exec(`UPDATE projects SET eng_model = ? WHERE id = ?`, model, id)
 	return err
 }
 
@@ -190,20 +208,20 @@ func (s *Store) SetChannelDelivery(id, delivery string) error {
 
 type Repo struct {
 	ID            string
-	ChannelID     string
+	ProjectID     string
 	Name          string
 	Path          string
 	DefaultBranch string
 }
 
 func (s *Store) AddRepo(r Repo) error {
-	_, err := s.db.Exec(`INSERT INTO repos (id, channel_id, name, path, default_branch) VALUES (?,?,?,?,?)`,
-		r.ID, r.ChannelID, r.Name, r.Path, r.DefaultBranch)
+	_, err := s.db.Exec(`INSERT INTO repos (id, project_id, name, path, default_branch) VALUES (?,?,?,?,?)`,
+		r.ID, r.ProjectID, r.Name, r.Path, r.DefaultBranch)
 	return err
 }
 
-func (s *Store) ReposForChannel(channelID string) ([]Repo, error) {
-	rows, err := s.db.Query(`SELECT id, channel_id, name, path, default_branch FROM repos WHERE channel_id = ? ORDER BY name`, channelID)
+func (s *Store) ReposForProject(projectID string) ([]Repo, error) {
+	rows, err := s.db.Query(`SELECT id, project_id, name, path, default_branch FROM repos WHERE project_id = ? ORDER BY name`, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -211,7 +229,7 @@ func (s *Store) ReposForChannel(channelID string) ([]Repo, error) {
 	var out []Repo
 	for rows.Next() {
 		var r Repo
-		if err := rows.Scan(&r.ID, &r.ChannelID, &r.Name, &r.Path, &r.DefaultBranch); err != nil {
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.Name, &r.Path, &r.DefaultBranch); err != nil {
 			return nil, err
 		}
 		out = append(out, r)
@@ -219,35 +237,35 @@ func (s *Store) ReposForChannel(channelID string) ([]Repo, error) {
 	return out, rows.Err()
 }
 
-// --- tasks ---
+// --- tickets ---
 
-type TaskStatus string
+type TicketStatus string
 
 const (
-	TaskQueued     TaskStatus = "queued"
-	TaskRunning    TaskStatus = "running"
-	TaskNeedsInput TaskStatus = "needs-input"
-	TaskBlocked    TaskStatus = "blocked"
-	TaskDelivering TaskStatus = "delivering"
-	TaskAttached   TaskStatus = "attached" // escape hatch open
-	TaskDone       TaskStatus = "done"
-	TaskFailed     TaskStatus = "failed"
-	TaskAbandoned  TaskStatus = "abandoned"
+	TicketQueued     TicketStatus = "queued"
+	TicketRunning    TicketStatus = "running"
+	TicketNeedsInput TicketStatus = "needs-input"
+	TicketBlocked    TicketStatus = "blocked"
+	TicketDelivering TicketStatus = "delivering"
+	TicketVisiting   TicketStatus = "visiting" // desk visit open
+	TicketDone       TicketStatus = "done"
+	TicketFailed     TicketStatus = "failed"
+	TicketAbandoned  TicketStatus = "abandoned"
 )
 
 // Terminal reports whether no further supervision applies.
-func (ts TaskStatus) Terminal() bool {
-	return ts == TaskDone || ts == TaskFailed || ts == TaskAbandoned
+func (ts TicketStatus) Terminal() bool {
+	return ts == TicketDone || ts == TicketFailed || ts == TicketAbandoned
 }
 
-type Task struct {
+type Ticket struct {
 	ID           string
-	ChannelID    string
+	ProjectID    string
 	RepoID       string
-	Kind         string // ship | scout
+	Kind         string // build | spike
 	Title        string
-	Status       TaskStatus
-	Model        string // "" = channel crew model, else per-task override
+	Status       TicketStatus
+	Model        string // "" = project eng model
 	Branch       string
 	WorktreePath string
 	SessionID    string
@@ -257,23 +275,23 @@ type Task struct {
 	UpdatedAt    int64
 }
 
-const taskCols = `id, channel_id, repo_id, kind, title, status, model, branch, worktree_path, session_id, brief_path, report_path, created_at, updated_at`
+const ticketCols = `id, project_id, repo_id, kind, title, status, model, branch, worktree_path, session_id, brief_path, report_path, created_at, updated_at`
 
-func scanTask(row interface{ Scan(...any) error }) (Task, error) {
-	var t Task
-	err := row.Scan(&t.ID, &t.ChannelID, &t.RepoID, &t.Kind, &t.Title, &t.Status, &t.Model, &t.Branch, &t.WorktreePath, &t.SessionID, &t.BriefPath, &t.ReportPath, &t.CreatedAt, &t.UpdatedAt)
+func scanTicket(row interface{ Scan(...any) error }) (Ticket, error) {
+	var t Ticket
+	err := row.Scan(&t.ID, &t.ProjectID, &t.RepoID, &t.Kind, &t.Title, &t.Status, &t.Model, &t.Branch, &t.WorktreePath, &t.SessionID, &t.BriefPath, &t.ReportPath, &t.CreatedAt, &t.UpdatedAt)
 	return t, err
 }
 
-func (s *Store) queryTasks(query string, args ...any) ([]Task, error) {
+func (s *Store) queryTickets(query string, args ...any) ([]Ticket, error) {
 	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []Task
+	var out []Ticket
 	for rows.Next() {
-		t, err := scanTask(rows)
+		t, err := scanTicket(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -282,53 +300,58 @@ func (s *Store) queryTasks(query string, args ...any) ([]Task, error) {
 	return out, rows.Err()
 }
 
-func (s *Store) CreateTask(t Task) error {
+func (s *Store) CreateTicket(t Ticket) error {
 	t.CreatedAt, t.UpdatedAt = now(), now()
 	if t.Status == "" {
-		t.Status = TaskQueued
+		t.Status = TicketQueued
 	}
-	_, err := s.db.Exec(`INSERT INTO tasks (`+taskCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		t.ID, t.ChannelID, t.RepoID, t.Kind, t.Title, t.Status, t.Model, t.Branch, t.WorktreePath, t.SessionID, t.BriefPath, t.ReportPath, t.CreatedAt, t.UpdatedAt)
+	_, err := s.db.Exec(`INSERT INTO tickets (`+ticketCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		t.ID, t.ProjectID, t.RepoID, t.Kind, t.Title, t.Status, t.Model, t.Branch, t.WorktreePath, t.SessionID, t.BriefPath, t.ReportPath, t.CreatedAt, t.UpdatedAt)
 	return err
 }
 
-func (s *Store) UpdateTask(t Task) error {
+func (s *Store) UpdateTicket(t Ticket) error {
 	t.UpdatedAt = now()
-	_, err := s.db.Exec(`UPDATE tasks SET status=?, model=?, branch=?, worktree_path=?, session_id=?, brief_path=?, report_path=?, updated_at=? WHERE id=?`,
+	_, err := s.db.Exec(`UPDATE tickets SET status=?, model=?, branch=?, worktree_path=?, session_id=?, brief_path=?, report_path=?, updated_at=? WHERE id=?`,
 		t.Status, t.Model, t.Branch, t.WorktreePath, t.SessionID, t.BriefPath, t.ReportPath, t.UpdatedAt, t.ID)
 	return err
 }
 
-func (s *Store) TaskByID(id string) (Task, error) {
-	t, err := scanTask(s.db.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id = ?`, id))
+func (s *Store) TicketByID(id string) (Ticket, error) {
+	t, err := scanTicket(s.db.QueryRow(`SELECT `+ticketCols+` FROM tickets WHERE id = ?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return t, ErrNotFound
 	}
 	return t, err
 }
 
-func (s *Store) TasksForChannel(channelID string) ([]Task, error) {
-	return s.queryTasks(`SELECT `+taskCols+` FROM tasks WHERE channel_id = ? ORDER BY created_at DESC`, channelID)
+func (s *Store) TicketsForProject(projectID string) ([]Ticket, error) {
+	return s.queryTickets(`SELECT `+ticketCols+` FROM tickets WHERE project_id = ? ORDER BY created_at DESC`, projectID)
 }
 
-// ActiveTasks returns all non-terminal tasks across channels (daemon boot reconcile).
-func (s *Store) ActiveTasks() ([]Task, error) {
-	return s.queryTasks(`SELECT ` + taskCols + ` FROM tasks WHERE status NOT IN ('done','failed','abandoned')`)
+// AllTickets returns every ticket (PM cross-project view, board).
+func (s *Store) AllTickets() ([]Ticket, error) {
+	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets ORDER BY updated_at DESC`)
 }
 
-// DoneTasksWithWorktree returns done tasks whose worktree lease was never
+// ActiveTickets returns all non-terminal tickets (daemon boot reconcile).
+func (s *Store) ActiveTickets() ([]Ticket, error) {
+	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets WHERE status NOT IN ('done','failed','abandoned')`)
+}
+
+// DoneTicketsWithWorktree returns done tickets whose worktree lease was never
 // returned (teardown interrupted, e.g. daemon restart).
-func (s *Store) DoneTasksWithWorktree() ([]Task, error) {
-	return s.queryTasks(`SELECT ` + taskCols + ` FROM tasks WHERE status = 'done' AND worktree_path != ''`)
+func (s *Store) DoneTicketsWithWorktree() ([]Ticket, error) {
+	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets WHERE status = 'done' AND worktree_path != ''`)
 }
 
 // --- messages ---
 
 type Message struct {
 	ID        int64
-	ChannelID string
-	TaskID    string // "" for main channel scroll
-	Author    string // captain | lead | crew:<task-id> | system
+	ProjectID string
+	TicketID  string // "" for the project's main scroll
+	Author    string // boss | pm | em | eng:<ticket-id> | system
 	Kind      string // text | report | gate | system
 	Body      string
 	CreatedAt int64
@@ -339,22 +362,23 @@ func (s *Store) AppendMessage(m Message) (int64, error) {
 	if m.Kind == "" {
 		m.Kind = "text"
 	}
-	res, err := s.db.Exec(`INSERT INTO messages (channel_id, task_id, author, kind, body, created_at) VALUES (?,?,?,?,?,?)`,
-		m.ChannelID, m.TaskID, m.Author, m.Kind, m.Body, m.CreatedAt)
+	res, err := s.db.Exec(`INSERT INTO messages (project_id, ticket_id, author, kind, body, created_at) VALUES (?,?,?,?,?,?)`,
+		m.ProjectID, m.TicketID, m.Author, m.Kind, m.Body, m.CreatedAt)
 	if err != nil {
 		return 0, err
 	}
 	return res.LastInsertId()
 }
 
-// Messages returns the scroll for a channel (taskID == "") or thread, oldest first.
-func (s *Store) Messages(channelID, taskID string, limit int) ([]Message, error) {
+// Messages returns the scroll for a project (ticketID == "") or ticket
+// thread, oldest first.
+func (s *Store) Messages(projectID, ticketID string, limit int) ([]Message, error) {
 	if limit <= 0 {
 		limit = 500
 	}
-	rows, err := s.db.Query(`SELECT id, channel_id, task_id, author, kind, body, created_at FROM (
-			SELECT * FROM messages WHERE channel_id = ? AND task_id = ? ORDER BY id DESC LIMIT ?
-		) ORDER BY id ASC`, channelID, taskID, limit)
+	rows, err := s.db.Query(`SELECT id, project_id, ticket_id, author, kind, body, created_at FROM (
+			SELECT * FROM messages WHERE project_id = ? AND ticket_id = ? ORDER BY id DESC LIMIT ?
+		) ORDER BY id ASC`, projectID, ticketID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +386,7 @@ func (s *Store) Messages(channelID, taskID string, limit int) ([]Message, error)
 	var out []Message
 	for rows.Next() {
 		var m Message
-		if err := rows.Scan(&m.ID, &m.ChannelID, &m.TaskID, &m.Author, &m.Kind, &m.Body, &m.CreatedAt); err != nil {
+		if err := rows.Scan(&m.ID, &m.ProjectID, &m.TicketID, &m.Author, &m.Kind, &m.Body, &m.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, m)
@@ -372,31 +396,212 @@ func (s *Store) Messages(channelID, taskID string, limit int) ([]Message, error)
 
 // --- reads / unread badges ---
 
-func scopeID(channelID, taskID string) string {
-	if taskID == "" {
-		return channelID
+func scopeID(projectID, ticketID string) string {
+	if ticketID == "" {
+		return projectID
 	}
-	return channelID + ":" + taskID
+	return projectID + ":" + ticketID
 }
 
-func (s *Store) MarkRead(channelID, taskID string, lastMessageID int64) error {
+func (s *Store) MarkRead(projectID, ticketID string, lastMessageID int64) error {
 	_, err := s.db.Exec(`INSERT INTO reads (scope_id, last_read_message_id) VALUES (?,?)
 		ON CONFLICT(scope_id) DO UPDATE SET last_read_message_id = MAX(last_read_message_id, excluded.last_read_message_id)`,
-		scopeID(channelID, taskID), lastMessageID)
+		scopeID(projectID, ticketID), lastMessageID)
 	return err
 }
 
-// UnreadCount counts messages after the read cursor, excluding the captain's own.
-func (s *Store) UnreadCount(channelID, taskID string) (int, error) {
+// UnreadCount counts messages after the read cursor, excluding the boss's own.
+func (s *Store) UnreadCount(projectID, ticketID string) (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM messages
-		WHERE channel_id = ? AND task_id = ? AND author != 'captain'
+		WHERE project_id = ? AND ticket_id = ? AND author != 'boss'
 		AND id > COALESCE((SELECT last_read_message_id FROM reads WHERE scope_id = ?), 0)`,
-		channelID, taskID, scopeID(channelID, taskID)).Scan(&n)
+		projectID, ticketID, scopeID(projectID, ticketID)).Scan(&n)
 	return n, err
 }
 
-// NewID returns a short random identifier with the given prefix, e.g. "ch_ab12cd34".
+// --- attention items (My Office) ---
+
+type ItemKind string
+
+const (
+	ItemQuestion ItemKind = "question"
+	ItemOptions  ItemKind = "options"
+	ItemDemo     ItemKind = "demo"
+	ItemPlan     ItemKind = "plan"
+	ItemBlocked  ItemKind = "blocked"
+	ItemFailed   ItemKind = "failed"
+	ItemHandbook ItemKind = "handbook"
+)
+
+type ItemTier string
+
+const (
+	TierInterrupt ItemTier = "interrupt"
+	TierBreak     ItemTier = "break"
+)
+
+type Item struct {
+	ID         string
+	Kind       ItemKind
+	Tier       ItemTier
+	ProjectID  string
+	TicketID   string
+	RefID      string // plan id / handbook proposal path, when applicable
+	Title      string
+	Body       string
+	Options    string // JSON array of {label, detail} for kind=options
+	CreatedAt  int64
+	ResolvedAt int64
+}
+
+const itemCols = `id, kind, tier, project_id, ticket_id, ref_id, title, body, options, created_at, resolved_at`
+
+func (s *Store) CreateItem(it Item) (Item, error) {
+	it.CreatedAt = now()
+	if it.ID == "" {
+		it.ID = NewID("itm")
+	}
+	_, err := s.db.Exec(`INSERT INTO items (`+itemCols+`) VALUES (?,?,?,?,?,?,?,?,?,?,0)`,
+		it.ID, it.Kind, it.Tier, it.ProjectID, it.TicketID, it.RefID, it.Title, it.Body, it.Options, it.CreatedAt)
+	return it, err
+}
+
+func scanItem(row interface{ Scan(...any) error }) (Item, error) {
+	var it Item
+	err := row.Scan(&it.ID, &it.Kind, &it.Tier, &it.ProjectID, &it.TicketID, &it.RefID, &it.Title, &it.Body, &it.Options, &it.CreatedAt, &it.ResolvedAt)
+	return it, err
+}
+
+// OpenItems returns unresolved items, interrupts first, oldest first within
+// a tier.
+func (s *Store) OpenItems() ([]Item, error) {
+	rows, err := s.db.Query(`SELECT ` + itemCols + ` FROM items WHERE resolved_at = 0
+		ORDER BY CASE tier WHEN 'interrupt' THEN 0 ELSE 1 END, created_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Item
+	for rows.Next() {
+		it, err := scanItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ItemByID(id string) (Item, error) {
+	it, err := scanItem(s.db.QueryRow(`SELECT `+itemCols+` FROM items WHERE id = ?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return it, ErrNotFound
+	}
+	return it, err
+}
+
+func (s *Store) ResolveItem(id string) error {
+	_, err := s.db.Exec(`UPDATE items SET resolved_at = ? WHERE id = ? AND resolved_at = 0`, now(), id)
+	return err
+}
+
+// ResolveTicketItems resolves all open items attached to a ticket (called
+// when the ticket leaves its waiting state).
+func (s *Store) ResolveTicketItems(ticketID string) ([]string, error) {
+	rows, err := s.db.Query(`SELECT id FROM items WHERE ticket_id = ? AND resolved_at = 0`, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, id := range ids {
+		if err := s.ResolveItem(id); err != nil {
+			return nil, err
+		}
+	}
+	return ids, nil
+}
+
+// --- plans ---
+
+type PlanStatus string
+
+const (
+	PlanPending  PlanStatus = "pending"
+	PlanApproved PlanStatus = "approved"
+	PlanRejected PlanStatus = "rejected"
+)
+
+type Plan struct {
+	ID        string
+	ProjectID string
+	DocPath   string
+	DocMD     string
+	Tickets   string // JSON array of proposed tickets
+	Questions string // JSON array of open questions
+	Status    PlanStatus
+	CreatedAt int64
+}
+
+const planCols = `id, project_id, doc_path, doc_md, tickets, questions, status, created_at`
+
+func (s *Store) CreatePlan(p Plan) (Plan, error) {
+	p.CreatedAt = now()
+	if p.ID == "" {
+		p.ID = NewID("plan")
+	}
+	if p.Status == "" {
+		p.Status = PlanPending
+	}
+	_, err := s.db.Exec(`INSERT INTO plans (`+planCols+`) VALUES (?,?,?,?,?,?,?,?)`,
+		p.ID, p.ProjectID, p.DocPath, p.DocMD, p.Tickets, p.Questions, p.Status, p.CreatedAt)
+	return p, err
+}
+
+func (s *Store) PlanByID(id string) (Plan, error) {
+	var p Plan
+	err := s.db.QueryRow(`SELECT `+planCols+` FROM plans WHERE id = ?`, id).
+		Scan(&p.ID, &p.ProjectID, &p.DocPath, &p.DocMD, &p.Tickets, &p.Questions, &p.Status, &p.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return p, ErrNotFound
+	}
+	return p, err
+}
+
+func (s *Store) SetPlanStatus(id string, status PlanStatus) error {
+	_, err := s.db.Exec(`UPDATE plans SET status = ? WHERE id = ?`, status, id)
+	return err
+}
+
+// --- settings (presence etc.) ---
+
+func (s *Store) GetSetting(key, fallback string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fallback, nil
+	}
+	return v, err
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?,?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// NewID returns a short random identifier with the given prefix, e.g. "prj_ab12cd34".
 func NewID(prefix string) string {
 	return fmt.Sprintf("%s_%08x", prefix, randUint32())
 }

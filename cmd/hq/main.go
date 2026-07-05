@@ -1,8 +1,8 @@
-// shipyard — a Slack-like TUI for commanding fleets of coding agents.
+// hq — an engineering department as a program.
 //
-//	shipyard              open the TUI (auto-starts the daemon)
-//	shipyard daemon run   run the daemon in the foreground
-//	shipyard doctor       check external tool availability
+//	hq              open the TUI (auto-starts the daemon)
+//	hq daemon run   run the daemon in the foreground
+//	hq doctor       check external tool availability
 package main
 
 import (
@@ -17,18 +17,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gohacki/shipyard/internal/agent/claude"
-	"github.com/gohacki/shipyard/internal/config"
-	"github.com/gohacki/shipyard/internal/daemon"
-	"github.com/gohacki/shipyard/internal/orch"
-	"github.com/gohacki/shipyard/internal/rpc"
-	"github.com/gohacki/shipyard/internal/store"
-	"github.com/gohacki/shipyard/internal/tui"
+	"github.com/gohacki/hq/internal/agent/claude"
+	"github.com/gohacki/hq/internal/config"
+	"github.com/gohacki/hq/internal/daemon"
+	"github.com/gohacki/hq/internal/orch"
+	"github.com/gohacki/hq/internal/rpc"
+	"github.com/gohacki/hq/internal/store"
+	"github.com/gohacki/hq/internal/tui"
 )
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "shipyard:", err)
+		fmt.Fprintln(os.Stderr, "hq:", err)
 		os.Exit(1)
 	}
 }
@@ -50,13 +50,13 @@ func run(args []string) error {
 		if len(args) > 1 && args[1] == "run" {
 			return runDaemon(paths)
 		}
-		return fmt.Errorf("usage: shipyard daemon run")
+		return fmt.Errorf("usage: hq daemon run")
 	case "doctor":
 		return runDoctor()
 	case "call":
 		return runCall(paths, args[1:])
-	case "mcp-lead":
-		return orch.RunLeadMCP(paths, args[1:])
+	case "mcp-em":
+		return orch.RunEMMCP(paths, args[1:])
 	case "help", "--help", "-h":
 		fmt.Print(helpText)
 		return nil
@@ -66,32 +66,32 @@ func run(args []string) error {
 	}
 }
 
-const helpText = `shipyard — a Slack-like TUI for commanding fleets of coding agents.
+const helpText = `hq — an engineering department as a program.
 
 Usage:
-  shipyard                       open the TUI (auto-starts the daemon)
-  shipyard daemon run            run the daemon in the foreground
-  shipyard doctor                check required external tools
-  shipyard call <method> [json]  raw RPC to the daemon (scripting/debugging)
-  shipyard help                  this help
+  hq                       open the TUI (auto-starts the daemon)
+  hq daemon run            run the daemon in the foreground
+  hq doctor                check required external tools
+  hq call <method> [json]  raw RPC to the daemon (scripting/debugging)
+  hq help                  this help
 
 The one-minute tour:
-  Channels are projects (one or more git repos). Talk to each channel's lead
-  agent; it delegates tasks to crewmate agents working in isolated git
-  worktrees. Tasks are threads. Create channels by talking to #home:
-    "new channel myapp with repo ~/code/myapp, delivery local-only"
+  You are the boss. The PM in the Conference Room creates projects ("new
+  project myapp with repo ~/code/myapp"). Each project has an EM that plans
+  and delegates tickets to engineer agents working in isolated git
+  worktrees. Everything that needs YOU — plan reviews, demos, questions —
+  queues in MY OFFICE, the home screen. Everything else stays out of sight.
 
 In the TUI:
-  tab        toggle composer <-> sidebar        enter  open / send
-  j/k        move selection                     esc    back
-  e          edit channel instructions          t      tmux escape hatch
-  1-9        promote scout proposal             ?      full help overlay
-  /model     switch models on the fly           q      quit (fleet keeps running)
+  j/k + enter  work the office queue      a      approve demo/handbook edit
+  b            department board           v      visit an agent's desk (tmux)
+  tab          sidebar (PM, projects)     M      presence (heads-down/avail/review)
+  ?            full help overlay          q      quit (the department keeps working)
 
-Everything runs on sonnet by default; upgrade any agent live with /model or
-by asking the lead ("upgrade yourself to opus").
+Everyone runs sonnet by default; upgrade any agent live with /model or by
+asking the EM ("upgrade yourself to opus").
 
-Full guide: docs/GUIDE.md in the repo, or https://github.com/gohacki/shipyard
+Full guide: docs/GUIDE.md in the repo, or https://github.com/gohacki/hq
 `
 
 func runDaemon(paths config.Paths) error {
@@ -154,11 +154,11 @@ func runTUI(paths config.Paths) error {
 	return tui.Run(cl)
 }
 
-// runCall is a scripting/debugging passthrough: `shipyard call <method>
+// runCall is a scripting/debugging passthrough: `hq call <method>
 // [json-params]` prints the raw RPC result. Auto-starts the daemon.
 func runCall(paths config.Paths, args []string) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: shipyard call <method> [json-params]")
+		return fmt.Errorf("usage: hq call <method> [json-params]")
 	}
 	cl, err := connect(paths)
 	if err != nil {
@@ -180,9 +180,9 @@ func runCall(paths config.Paths, args []string) error {
 func runDoctor() error {
 	tools := []struct{ name, why string }{
 		{"claude", "agent harness (required)"},
-		{"tmux", "escape hatch (required for `t`)"},
-		{"treehouse", "worktree pools (required for crewmates)"},
-		{"no-mistakes", "delivery pipeline (required for no-mistakes channels)"},
+		{"tmux", "desk visits (required for v)"},
+		{"treehouse", "worktree pools (required for engineers)"},
+		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)"},
 		{"git", "everything"},
 	}
 	ok := true

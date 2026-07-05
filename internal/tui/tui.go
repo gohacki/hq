@@ -1,6 +1,7 @@
-// Package tui is shipyard's Slack-like terminal UI: channel sidebar with
-// unread badges, message scroll, task threads, composer. A thin client — all
-// state lives in the daemon and arrives over RPC + pushed events.
+// Package tui is hq's terminal UI. The home screen is My Office — a decision
+// queue holding only what needs the boss. Everything else (projects, ticket
+// threads, the board) is drill-down. A thin client: all state lives in the
+// daemon and arrives over RPC + pushed events.
 package tui
 
 import (
@@ -10,17 +11,14 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
-	"github.com/gohacki/shipyard/internal/daemon"
-	"github.com/gohacki/shipyard/internal/orch"
-	"github.com/gohacki/shipyard/internal/rpc"
-	"github.com/gohacki/shipyard/internal/store"
+	"github.com/gohacki/hq/internal/daemon"
+	"github.com/gohacki/hq/internal/rpc"
+	"github.com/gohacki/hq/internal/store"
 )
 
 func Run(cl *rpc.Client) error {
@@ -39,69 +37,104 @@ func Run(cl *rpc.Client) error {
 	return err
 }
 
-// --- messages ---
+// --- tea messages ---
 
 type daemonEvent struct{ ev rpc.Event }
 type daemonGone struct{}
 type refreshed struct {
-	channels []daemon.ChannelView
-	tasks    []daemon.TaskView
+	projects []daemon.ProjectView
+	tickets  []daemon.TicketView // open project's tickets
+	all      []daemon.TicketView // all tickets (board)
 	messages []store.Message
+	items    []store.Item
+	presence string
 }
+type planLoaded struct{ plan store.Plan }
 type errMsg struct{ err error }
+type statusMsg struct{ s string }
 
-// --- model ---
+// --- screens & focus ---
+
+type screen int
+
+const (
+	screenOffice screen = iota
+	screenChat
+	screenPlan
+	screenBoard
+)
 
 type focusArea int
 
 const (
 	focusSidebar focusArea = iota
 	focusComposer
+	focusMain // office cards / plan rows / board cards
 )
-
-type itemKind int
-
-const (
-	itemChannel itemKind = iota
-	itemThread           // task thread nested under the open channel
-	itemHeader           // non-selectable section label
-	itemLead             // crew section: the open channel's lead agent
-	itemCrew             // crew section: a live crewmate (enter = live session)
-)
-
-// sideItem is one row in the sidebar.
-type sideItem struct {
-	kind    itemKind
-	label   string // for itemHeader
-	channel daemon.ChannelView
-	task    *daemon.TaskView // itemThread / itemCrew
-}
-
-func (it sideItem) selectable() bool { return it.kind != itemHeader }
 
 type model struct {
 	cl *rpc.Client
 
-	channels []daemon.ChannelView
-	tasks    []daemon.TaskView // tasks of the open channel
-	messages []store.Message   // scroll of the open channel/thread
+	projects []daemon.ProjectView
+	tickets  []daemon.TicketView // of the open project
+	all      []daemon.TicketView // department-wide (board)
+	messages []store.Message
+	items    []store.Item // open office items
+	presence string
 
-	items      []sideItem // rendered sidebar rows
-	cursor     int        // sidebar cursor
-	openChan   string     // channel id whose scroll is shown
-	openThread string     // task id when a thread is open ("" = channel)
-
+	screen      screen
 	focus       focusArea
 	showHelp    bool
-	tmuxSession string // the TUI's own tmux session; escape windows open here
-	mainWidth   int
-	innerH      int
-	vp          viewport.Model
-	composer    textarea.Model
-	width       int
-	height      int
-	status      string
-	ready       bool
+	expandChat  bool // ticket timeline: x = full chat
+	tmuxSession string
+
+	// sidebar
+	side       []sideItem
+	sideCursor int
+
+	// chat scope
+	openProject string // project id
+	openTicket  string // ticket id ("" = project scroll)
+
+	// office
+	officeCursor int
+	optionsMode  bool // selected options item awaits 1-9
+
+	// plan review
+	plan        store.Plan
+	planTickets []planTicketRow
+	planQs      []planQuestionRow
+	planCursor  int
+	planAnswer  int // index of question being answered in composer (-1 none)
+
+	// board
+	boardSel boardSel
+
+	vp        viewport.Model
+	composer  textarea.Model
+	width     int
+	height    int
+	mainWidth int
+	innerH    int
+	status    string
+	ready     bool
+}
+
+type planTicketRow struct {
+	t        proposedTicket
+	accepted bool
+}
+
+type planQuestionRow struct {
+	q      string
+	answer string
+}
+
+type proposedTicket struct {
+	Repo  string `json:"repo"`
+	Kind  string `json:"kind"`
+	Title string `json:"title"`
+	Brief string `json:"brief"`
 }
 
 func newModel(cl *rpc.Client) *model {
@@ -110,12 +143,13 @@ func newModel(cl *rpc.Client) *model {
 	ta.SetHeight(3)
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
-	m := &model{cl: cl, composer: ta, focus: focusComposer}
+	m := &model{cl: cl, screen: screenOffice, focus: focusMain, presence: "available", planAnswer: -1}
 	if os.Getenv("TMUX") != "" {
 		if out, err := exec.Command("tmux", "display-message", "-p", "#S").Output(); err == nil {
 			m.tmuxSession = strings.TrimSpace(string(out))
 		}
 	}
+	m.composer = ta
 	return m
 }
 
@@ -125,22 +159,27 @@ func (m *model) Init() tea.Cmd {
 
 // refresh re-pulls everything the current view needs. Cheap: local socket.
 func (m *model) refresh() tea.Cmd {
-	openChan, openThread := m.openChan, m.openThread
+	openProject, openTicket := m.openProject, m.openTicket
 	return func() tea.Msg {
-		var chs []daemon.ChannelView
-		if err := m.cl.Call("channels.list", nil, &chs); err != nil {
+		var r refreshed
+		if err := m.cl.Call("projects.list", nil, &r.projects); err != nil {
 			return errMsg{err}
 		}
-		r := refreshed{channels: chs}
-		if openChan == "" && len(chs) > 0 {
-			openChan = chs[0].ID
+		if err := m.cl.Call("items.list", nil, &r.items); err != nil {
+			return errMsg{err}
 		}
-		if openChan != "" {
-			if err := m.cl.Call("tasks.list", map[string]any{"channel_id": openChan}, &r.tasks); err != nil {
+		if err := m.cl.Call("tickets.list", map[string]any{"project_id": ""}, &r.all); err != nil {
+			return errMsg{err}
+		}
+		if err := m.cl.Call("presence.get", nil, &r.presence); err != nil {
+			return errMsg{err}
+		}
+		if openProject != "" {
+			if err := m.cl.Call("tickets.list", map[string]any{"project_id": openProject}, &r.tickets); err != nil {
 				return errMsg{err}
 			}
 			if err := m.cl.Call("messages.list", map[string]any{
-				"channel_id": openChan, "task_id": openThread,
+				"project_id": openProject, "ticket_id": openTicket,
 			}, &r.messages); err != nil {
 				return errMsg{err}
 			}
@@ -150,26 +189,39 @@ func (m *model) refresh() tea.Cmd {
 }
 
 func (m *model) markRead() tea.Cmd {
-	if len(m.messages) == 0 {
+	if m.screen != screenChat || len(m.messages) == 0 {
 		return nil
 	}
 	last := m.messages[len(m.messages)-1].ID
-	ch, th := m.openChan, m.openThread
+	p, t := m.openProject, m.openTicket
 	return func() tea.Msg {
-		m.cl.Call("reads.mark", map[string]any{"channel_id": ch, "task_id": th, "last_id": last}, nil)
+		m.cl.Call("reads.mark", map[string]any{"project_id": p, "ticket_id": t, "last_id": last}, nil)
 		return nil
 	}
 }
 
 func (m *model) send(body string) tea.Cmd {
-	ch, th := m.openChan, m.openThread
+	p, t := m.openProject, m.openTicket
 	return func() tea.Msg {
 		if err := m.cl.Call("message.send", map[string]any{
-			"channel_id": ch, "task_id": th, "body": body,
+			"project_id": p, "ticket_id": t, "body": body,
 		}, nil); err != nil {
 			return errMsg{err}
 		}
 		return nil
+	}
+}
+
+func (m *model) call(method string, params map[string]any, okStatus string) tea.Cmd {
+	return func() tea.Msg {
+		var out json.RawMessage
+		if err := m.cl.Call(method, params, &out); err != nil {
+			return errMsg{err}
+		}
+		if okStatus != "" {
+			return statusMsg{okStatus}
+		}
+		return statusMsg{strings.Trim(string(out), `"`)}
 	}
 }
 
@@ -184,23 +236,34 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonGone:
-		m.status = "daemon connection lost — restart shipyard"
+		m.status = "daemon connection lost — restart hq"
 		return m, nil
 
 	case errMsg:
 		m.status = msg.err.Error()
 		return m, nil
 
+	case statusMsg:
+		m.status = msg.s
+		return m, m.refresh()
+
 	case refreshed:
-		m.channels = msg.channels
-		m.tasks = msg.tasks
+		m.projects = msg.projects
+		m.tickets = msg.tickets
+		m.all = msg.all
 		m.messages = msg.messages
-		if m.openChan == "" && len(m.channels) > 0 {
-			m.openChan = m.channels[0].ID
+		m.items = msg.items
+		m.presence = msg.presence
+		if m.officeCursor >= len(m.items) {
+			m.officeCursor = max(0, len(m.items)-1)
 		}
 		m.rebuildSidebar()
-		m.renderMessages()
+		m.renderMain()
 		return m, m.markRead()
+
+	case planLoaded:
+		m.openPlanScreen(msg.plan)
+		return m, nil
 
 	case daemonEvent:
 		return m.handleDaemonEvent(msg.ev)
@@ -222,19 +285,19 @@ func (m *model) handleDaemonEvent(ev rpc.Event) (tea.Model, tea.Cmd) {
 	switch ev.Event {
 	case rpc.EvMessageNew:
 		var msg store.Message
-		if json.Unmarshal(ev.Data, &msg) == nil &&
-			msg.ChannelID == m.openChan && msg.TaskID == m.openThread {
+		if json.Unmarshal(ev.Data, &msg) == nil && m.screen == screenChat &&
+			msg.ProjectID == m.openProject && msg.TicketID == m.openTicket {
 			m.messages = append(m.messages, msg)
-			m.renderMessages()
+			m.renderMain()
 			m.vp.GotoBottom()
 			return m, tea.Batch(m.markRead(), m.refresh())
 		}
 		return m, m.refresh()
-	case rpc.EvNeedsInput:
-		var n rpc.NeedsInput
-		if json.Unmarshal(ev.Data, &n) == nil {
-			m.status = fmt.Sprintf("🔔 %s: %s", n.Reason, n.Summary)
-			return m, tea.Batch(m.refresh(), notifyCmd(n))
+	case rpc.EvItemNew:
+		var it store.Item
+		if json.Unmarshal(ev.Data, &it) == nil {
+			m.status = fmt.Sprintf("🔔 %s: %s", it.Kind, it.Title)
+			return m, tea.Batch(m.refresh(), m.notifyCmd(it))
 		}
 		return m, m.refresh()
 	default:
@@ -242,503 +305,26 @@ func (m *model) handleDaemonEvent(ev rpc.Event) (tea.Model, tea.Cmd) {
 	}
 }
 
-// notifyCmd raises a desktop notification (macOS) for needs-input events.
-func notifyCmd(n rpc.NeedsInput) tea.Cmd {
+// notifyCmd raises a desktop notification for a new office item, gated by
+// presence: heads-down → interrupts only; available/review → everything.
+func (m *model) notifyCmd(it store.Item) tea.Cmd {
+	if m.presence == "heads-down" && it.Tier != store.TierInterrupt {
+		return nil
+	}
 	return func() tea.Msg {
 		if runtime.GOOS == "darwin" {
-			script := fmt.Sprintf(`display notification %q with title "shipyard" subtitle %q`, n.Summary, n.Reason)
+			script := fmt.Sprintf(`display notification %q with title "hq" subtitle %q`, it.Title, string(it.Kind))
 			exec.Command("osascript", "-e", script).Run()
 		}
 		return nil
 	}
 }
 
-func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Help overlay swallows keys until dismissed.
-	if m.showHelp {
-		switch k.String() {
-		case "ctrl+d", "ctrl+u", "pgdown", "pgup", "j", "k", "down", "up", "g", "G":
-			var cmd tea.Cmd
-			m.vp, cmd = m.vp.Update(k)
-			return m, cmd
-		case "ctrl+c":
-			return m, tea.Quit
-		default:
-			m.showHelp = false
-			m.renderMessages()
-			m.vp.GotoBottom()
-			return m, nil
-		}
+func max(a, b int) int {
+	if a > b {
+		return a
 	}
-
-	// Global keys.
-	switch k.String() {
-	case "ctrl+c":
-		return m, tea.Quit
-	case "tab":
-		if m.focus == focusComposer {
-			m.focus = focusSidebar
-			m.composer.Blur()
-		} else {
-			m.focus = focusComposer
-			return m, m.composer.Focus()
-		}
-		return m, nil
-	}
-
-	if m.focus == focusComposer {
-		switch k.String() {
-		case "enter":
-			body := strings.TrimSpace(m.composer.Value())
-			if body == "" {
-				return m, nil
-			}
-			m.composer.Reset()
-			if strings.HasPrefix(body, "/model") {
-				return m, m.modelCommand(strings.Fields(body)[1:])
-			}
-			if body == "/help" || body == "/?" {
-				m.openHelp()
-				return m, nil
-			}
-			return m, m.send(body)
-		case "shift+enter", "alt+enter":
-			m.composer.SetValue(m.composer.Value() + "\n")
-			return m, nil
-		case "esc":
-			if m.openThread != "" {
-				m.openThread = ""
-				return m, m.refresh()
-			}
-			m.focus = focusSidebar
-			m.composer.Blur()
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.composer, cmd = m.composer.Update(k)
-		return m, cmd
-	}
-
-	// Sidebar / navigation focus.
-	switch k.String() {
-	case "q":
-		return m, tea.Quit
-	case "j", "down":
-		if m.cursor < len(m.items)-1 {
-			m.cursor++
-			m.skipHeader(1)
-		}
-		return m, nil
-	case "k", "up":
-		if m.cursor > 0 {
-			m.cursor--
-			m.skipHeader(-1)
-		}
-		return m, nil
-	case "enter":
-		return m.openCursor()
-	case "esc":
-		if m.openThread != "" {
-			m.openThread = ""
-			return m, m.refresh()
-		}
-		return m, nil
-	case "e":
-		return m.openInstructions()
-	case "t":
-		return m.escapeHatch()
-	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
-		return m.promoteProposal(int(k.String()[0] - '0'))
-	case "?":
-		m.openHelp()
-		return m, nil
-	case "g":
-		m.vp.GotoTop()
-		return m, nil
-	case "G":
-		m.vp.GotoBottom()
-		return m, nil
-	case "ctrl+d", "ctrl+u", "pgdown", "pgup":
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(k)
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m *model) openCursor() (tea.Model, tea.Cmd) {
-	if m.cursor >= len(m.items) {
-		return m, nil
-	}
-	it := m.items[m.cursor]
-	switch it.kind {
-	case itemThread:
-		m.openThread = it.task.ID
-	case itemChannel:
-		m.openChan = it.channel.ID
-		m.openThread = ""
-	case itemLead:
-		return m, m.escapeCmd("lead.escape", map[string]any{"channel_id": it.channel.ID})
-	case itemCrew:
-		return m, m.escapeCmd("task.escape", map[string]any{"task_id": it.task.ID})
-	default:
-		return m, nil
-	}
-	m.focus = focusComposer
-	return m, tea.Batch(m.refresh(), m.composer.Focus())
-}
-
-// escapeCmd asks the daemon to open a live-session tmux window in the TUI's
-// own tmux session.
-func (m *model) escapeCmd(method string, params map[string]any) tea.Cmd {
-	params["tmux_session"] = m.tmuxSession
-	return func() tea.Msg {
-		var win string
-		if err := m.cl.Call(method, params, &win); err != nil {
-			return errMsg{err}
-		}
-		return errMsg{fmt.Errorf("opened tmux window %s", win)} // status line
-	}
-}
-
-func (m *model) openInstructions() (tea.Model, tea.Cmd) {
-	var res struct{ Path, Body string }
-	if err := m.cl.Call("instructions.get", map[string]any{"channel_id": m.openChan}, &res); err != nil {
-		m.status = err.Error()
-		return m, nil
-	}
-	editor := os.Getenv("EDITOR")
-	if editor == "" {
-		editor = "vi"
-	}
-	c := exec.Command(editor, res.Path)
-	return m, tea.ExecProcess(c, func(err error) tea.Msg {
-		if err != nil {
-			return errMsg{err}
-		}
-		return nil
-	})
-}
-
-func (m *model) escapeHatch() (tea.Model, tea.Cmd) {
-	if m.cursor < len(m.items) {
-		if it := m.items[m.cursor]; it.kind == itemLead {
-			return m, m.escapeCmd("lead.escape", map[string]any{"channel_id": it.channel.ID})
-		} else if it.task != nil {
-			return m, m.escapeCmd("task.escape", map[string]any{"task_id": it.task.ID})
-		}
-	}
-	if m.openThread != "" {
-		return m, m.escapeCmd("task.escape", map[string]any{"task_id": m.openThread})
-	}
-	m.status = "select a task or crew member first (t = drop into their session)"
-	return m, nil
-}
-
-// modelCommand implements the composer's /model command:
-//
-//	/model              show current models for this scope
-//	/model opus         thread open → that crewmate; channel → the lead
-//	/model crew sonnet  channel's default for future crewmates
-func (m *model) modelCommand(args []string) tea.Cmd {
-	var cur daemon.ChannelView
-	for _, ch := range m.channels {
-		if ch.ID == m.openChan {
-			cur = ch
-		}
-	}
-	show := func(s string) tea.Cmd {
-		m.status = s
-		return nil
-	}
-	orDefault := func(s string) string {
-		if s == "" {
-			return "sonnet (default)"
-		}
-		return s
-	}
-	if len(args) == 0 {
-		if m.openThread != "" {
-			for _, t := range m.tasks {
-				if t.ID == m.openThread {
-					return show(fmt.Sprintf("crewmate model: %s · /model <sonnet|opus|fable|haiku> to switch", orDefault(t.Model)))
-				}
-			}
-		}
-		return show(fmt.Sprintf("lead: %s · crew default: %s · /model <m> = lead, /model crew <m> = crew default",
-			orDefault(cur.LeadModel), orDefault(cur.CrewModel)))
-	}
-	scope, modelName := "", ""
-	switch {
-	case len(args) == 1:
-		modelName = args[0]
-		if m.openThread != "" {
-			scope = "task"
-		} else {
-			scope = "lead"
-		}
-	case args[0] == "crew":
-		scope, modelName = "crew", args[1]
-	case args[0] == "lead":
-		scope, modelName = "lead", args[1]
-	default:
-		return show("usage: /model [crew|lead] <sonnet|opus|fable|haiku>")
-	}
-	params := map[string]any{"channel_id": m.openChan, "scope": scope, "model": modelName}
-	if scope == "task" {
-		params["task_id"] = m.openThread
-	}
-	return func() tea.Msg {
-		var out string
-		if err := m.cl.Call("model.set", params, &out); err != nil {
-			return errMsg{err}
-		}
-		return errMsg{fmt.Errorf("%s", out)} // status line
-	}
-}
-
-// openHelp shows the help overlay in the message viewport.
-func (m *model) openHelp() {
-	m.showHelp = true
-	m.vp.SetContent(helpBody)
-	m.vp.GotoTop()
-}
-
-const helpBody = `  SHIPYARD HELP                                (any key closes; j/k scroll)
-
-  THE MODEL
-    Channels are projects (one or more git repos). Each channel has a lead
-    agent — talk to it in the channel; it delegates tasks to crewmate agents
-    working in isolated git worktrees. Every task is a thread. #home is the
-    assistant that creates channels:
-      "new channel myapp with repo ~/code/myapp, delivery local-only"
-
-  SIDEBAR
-    Channels first, with the open channel's task threads nested under it.
-    Below them, the CREW section lists the open channel's lead and every
-    live crewmate — enter on a member drops you straight into their Claude
-    session in a tmux window, console pane alongside.
-
-  KEYS
-    tab            toggle composer <-> sidebar
-    enter          composer: send · sidebar: open channel/thread,
-                   or open a crew member's live session
-    shift+enter    newline in composer
-    j / k, arrows  move sidebar selection
-    esc            thread -> channel · composer -> sidebar
-    e              edit channel instructions in $EDITOR
-    t              escape hatch: tmux window, crewmate live (left) +
-                   worktree shell (right); close window to hand back
-    1-9            in a scout thread: promote proposal N to a ship task
-    g / G          scroll top / bottom     ctrl+d / ctrl+u  half page
-    ?  or /help    this overlay
-    q / ctrl+c     quit the TUI (daemon + crewmates keep running)
-
-  COMPOSER COMMANDS
-    /model                     show models for what you're looking at
-    /model opus                channel: upgrade lead · thread: that crewmate
-    /model crew haiku          default for future crewmates in this channel
-    /model lead fable          explicit lead switch
-    Models: sonnet (fleet default) · opus · fable · haiku. Switches resume
-    the same session — no context lost. Or just ask the lead in chat.
-
-  TASKS
-    ship   delivers a change via the channel's delivery mode
-           (no-mistakes pipeline | direct-pr | local-only)
-    scout  investigates; posts a report with proposed follow-ups (1-9)
-    Status: ● running  ✋ needs you  🚀 delivering  ⌨ attached  ✓ done  ✗ failed
-
-  VERIFICATION
-    With channel verify on (default on-completion), ship crewmates stop and
-    hand you test instructions — dev server running from their worktree on a
-    unique port — and wait for your sign-off in the thread before closing.
-
-  MORE
-    shipyard help          CLI summary
-    docs/GUIDE.md          the full user guide
-    Channel settings (delivery, verify, models, repos): ask the lead.`
-
-// promoteProposal converts proposal N of the open scout thread's report into
-// a ship task (scout→ship handoff).
-func (m *model) promoteProposal(n int) (tea.Model, tea.Cmd) {
-	if m.openThread == "" {
-		return m, nil
-	}
-	var report string
-	for i := len(m.messages) - 1; i >= 0; i-- {
-		if m.messages[i].Kind == "report" {
-			report = m.messages[i].Body
-			break
-		}
-	}
-	if report == "" {
-		return m, nil
-	}
-	props := orch.ProposedTasks(report)
-	if n < 1 || n > len(props) {
-		m.status = fmt.Sprintf("report has %d proposed task(s)", len(props))
-		return m, nil
-	}
-	taskID, proposal := m.openThread, props[n-1]
-	return m, func() tea.Msg {
-		var t store.Task
-		if err := m.cl.Call("task.handoff", map[string]any{"task_id": taskID, "proposal": proposal}, &t); err != nil {
-			return errMsg{err}
-		}
-		return errMsg{fmt.Errorf("ship task created: %s", t.Title)}
-	}
-}
-
-// --- layout & rendering ---
-
-const sidebarWidth = 24
-
-var (
-	styleSidebar = lipgloss.NewStyle().Width(sidebarWidth).Padding(0, 1).
-			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("240"))
-	styleFrame       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
-	styleSideHeader  = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
-	styleSideSel     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62"))
-	styleSideChan    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	styleSideTask    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styleBadge       = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("160")).Padding(0, 1).Bold(true)
-	styleHeader      = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("236")).Padding(0, 1)
-	styleStatus      = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 1)
-	styleAuthCaptain = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("45"))
-	styleAuthLead    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
-	styleAuthCrew    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
-	styleAuthSystem  = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
-	styleTime        = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleReport      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-)
-
-// layout recomputes pane sizes. The outer frame border eats 2 cols/rows and
-// the sidebar's right border 1 col.
-func (m *model) layout() {
-	innerW, innerH := m.width-2, m.height-2
-	mainWidth := innerW - sidebarWidth - 1
-	if mainWidth < 20 {
-		mainWidth = 20
-	}
-	vpHeight := innerH - 1 /*header*/ - 5 /*composer*/ - 1 /*status*/
-	if vpHeight < 3 {
-		vpHeight = 3
-	}
-	m.mainWidth, m.innerH = mainWidth, innerH
-	m.vp = viewport.New(mainWidth, vpHeight)
-	m.composer.SetWidth(mainWidth - 2)
-	m.renderMessages()
-	m.vp.GotoBottom()
-}
-
-func (m *model) rebuildSidebar() {
-	m.items = m.items[:0]
-	var open daemon.ChannelView
-	for _, ch := range m.channels {
-		m.items = append(m.items, sideItem{kind: itemChannel, channel: ch})
-		if ch.ID == m.openChan {
-			open = ch
-			for i := range m.tasks {
-				m.items = append(m.items, sideItem{kind: itemThread, channel: ch, task: &m.tasks[i]})
-			}
-		}
-	}
-	// Crew section for the open channel: the lead plus every crewmate with a
-	// live-resumable session. Enter drops into their session in tmux.
-	if open.ID != "" {
-		m.items = append(m.items, sideItem{kind: itemHeader, label: "crew"})
-		m.items = append(m.items, sideItem{kind: itemLead, channel: open})
-		for i := range m.tasks {
-			t := &m.tasks[i]
-			if t.SessionID != "" && !t.Status.Terminal() {
-				m.items = append(m.items, sideItem{kind: itemCrew, channel: open, task: t})
-			}
-		}
-	}
-	if m.cursor >= len(m.items) {
-		m.cursor = max(0, len(m.items)-1)
-	}
-	m.skipHeader(1)
-}
-
-// skipHeader nudges the cursor off non-selectable rows in direction dir.
-func (m *model) skipHeader(dir int) {
-	for m.cursor >= 0 && m.cursor < len(m.items) && !m.items[m.cursor].selectable() {
-		next := m.cursor + dir
-		if next < 0 || next >= len(m.items) {
-			dir = -dir
-			next = m.cursor + dir
-			if next < 0 || next >= len(m.items) {
-				return
-			}
-		}
-		m.cursor = next
-	}
-}
-
-func statusIcon(s store.TaskStatus) string {
-	switch s {
-	case store.TaskRunning:
-		return "●"
-	case store.TaskNeedsInput, store.TaskBlocked:
-		return "✋"
-	case store.TaskDelivering:
-		return "🚀"
-	case store.TaskAttached:
-		return "⌨"
-	case store.TaskDone:
-		return "✓"
-	case store.TaskFailed:
-		return "✗"
-	default:
-		return "…"
-	}
-}
-
-func (m *model) sidebarView(height int) string {
-	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" ⚓ shipyard") + "\n\n")
-	for i, it := range m.items {
-		var line string
-		switch it.kind {
-		case itemHeader:
-			b.WriteString("\n" + styleSideHeader.Render("— "+it.label+" —") + "\n")
-			continue
-		case itemChannel:
-			badge := ""
-			pad := 0
-			if it.channel.Unread > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(it.channel.Unread))
-				pad = 3 + len(fmt.Sprint(it.channel.Unread))
-			}
-			name := "# " + truncate(it.channel.Name, sidebarWidth-4-pad)
-			line = styleSideChan.Render(name) + badge
-		case itemThread:
-			t := it.task
-			badge := ""
-			pad := 0
-			if t.Unread > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(t.Unread))
-				pad = 3 + len(fmt.Sprint(t.Unread))
-			}
-			name := fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8-pad))
-			line = styleSideTask.Render(name) + badge
-		case itemLead:
-			mdl := it.channel.LeadModel
-			if mdl == "" {
-				mdl = "sonnet"
-			}
-			line = styleSideTask.Render(" ◉ " + truncate("lead · "+mdl, sidebarWidth-6))
-		case itemCrew:
-			line = styleSideTask.Render(fmt.Sprintf(" %s %s", statusIcon(it.task.Status), truncate(it.task.Title, sidebarWidth-7)))
-		}
-		if i == m.cursor && m.focus == focusSidebar {
-			line = styleSideSel.Render(stripANSIPad(line, sidebarWidth-2))
-		}
-		b.WriteString(line + "\n")
-	}
-	return styleSidebar.Height(height).Render(b.String())
+	return b
 }
 
 func truncate(s string, n int) string {
@@ -750,127 +336,4 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return string(r[:n-1]) + "…"
-}
-
-// stripANSIPad renders selection rows at a fixed width (drop styling, pad).
-func stripANSIPad(s string, w int) string {
-	plain := stripANSI(s)
-	if lipgloss.Width(plain) < w {
-		plain += strings.Repeat(" ", w-lipgloss.Width(plain))
-	}
-	return plain
-}
-
-func stripANSI(s string) string {
-	var b strings.Builder
-	inEsc := false
-	for _, r := range s {
-		switch {
-		case inEsc:
-			if r == 'm' {
-				inEsc = false
-			}
-		case r == '\x1b':
-			inEsc = true
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
-
-func authorStyle(author string) (string, lipgloss.Style) {
-	switch {
-	case author == "captain":
-		return "you", styleAuthCaptain
-	case author == "lead":
-		return "lead", styleAuthLead
-	case strings.HasPrefix(author, "crew:"):
-		return "crewmate", styleAuthCrew
-	default:
-		return "system", styleAuthSystem
-	}
-}
-
-func (m *model) renderMessages() {
-	if m.vp.Width == 0 || m.showHelp {
-		return
-	}
-	var b strings.Builder
-	for _, msg := range m.messages {
-		name, st := authorStyle(msg.Author)
-		ts := time.Unix(msg.CreatedAt, 0).Format("15:04")
-		b.WriteString(st.Render(name) + " " + styleTime.Render(ts) + "\n")
-		body := msg.Body
-		if msg.Kind == "report" {
-			body = styleReport.Width(m.vp.Width - 4).Render(body)
-		} else {
-			body = lipgloss.NewStyle().Width(m.vp.Width - 2).Render(body)
-		}
-		b.WriteString(body + "\n\n")
-	}
-	if len(m.messages) == 0 {
-		b.WriteString(styleAuthSystem.Render("no messages yet — say something below"))
-	}
-	m.vp.SetContent(b.String())
-}
-
-func (m *model) headerView() string {
-	name := ""
-	for _, ch := range m.channels {
-		if ch.ID == m.openChan {
-			name = "#" + ch.Name
-			repos := make([]string, len(ch.Repos))
-			for i, r := range ch.Repos {
-				repos[i] = r.Name
-			}
-			if len(repos) > 0 {
-				name += "  ·  " + strings.Join(repos, ", ") + "  ·  " + ch.Delivery
-			}
-		}
-	}
-	if m.openThread != "" {
-		for _, t := range m.tasks {
-			if t.ID == m.openThread {
-				name += fmt.Sprintf("  ›  🧵 %s [%s]", t.Title, t.Status)
-				if t.Model != "" {
-					name += " · " + t.Model
-				}
-			}
-		}
-	}
-	w := m.mainWidth
-	if w < 10 {
-		w = 10
-	}
-	return styleHeader.Width(w).Render(name)
-}
-
-func (m *model) View() string {
-	if !m.ready {
-		return "loading…"
-	}
-	help := "?: help · tab: focus · enter: open/send · esc: back · e: instructions · t: tmux hatch · 1-9: promote · /model · q: quit"
-	status := m.status
-	if status == "" {
-		status = help
-	}
-	main := lipgloss.JoinVertical(lipgloss.Left,
-		m.headerView(),
-		m.vp.View(),
-		m.composer.View(),
-		styleStatus.Render(truncate(status, m.mainWidth-2)),
-	)
-	body := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.sidebarView(m.innerH),
-		lipgloss.NewStyle().Width(m.mainWidth).Height(m.innerH).Render(main),
-	)
-	return styleFrame.Render(body)
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

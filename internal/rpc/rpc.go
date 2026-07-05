@@ -1,6 +1,6 @@
-// Package rpc implements shipyard's daemon protocol: newline-delimited JSON
-// over a unix socket. Two frame kinds flow daemon→client: responses (matched
-// to a request id) and events (pushed to subscribers). Clients send requests.
+// Package rpc implements hq's daemon protocol: newline-delimited JSON over a
+// unix socket. Two frame kinds flow daemon→client: responses (matched to a
+// request id) and events (pushed to subscribers). Clients send requests.
 package rpc
 
 import (
@@ -21,28 +21,15 @@ type Response struct {
 
 // Event is pushed to clients that called events.subscribe.
 type Event struct {
-	Event string          `json:"event"` // e.g. message.new, task.updated, channel.created
+	Event string          `json:"event"`
 	Data  json.RawMessage `json:"data"`
-}
-
-// frame is the wire envelope daemon→client; exactly one field set.
-type frame struct {
-	*Response
-	*Event
 }
 
 // Event names.
 const (
 	EvMessageNew     = "message.new"     // data: store.Message
-	EvTaskUpdated    = "task.updated"    // data: store.Task
-	EvChannelCreated = "channel.created" // data: store.Channel
-	EvNeedsInput     = "needs.input"     // data: NeedsInput
+	EvTicketUpdated  = "ticket.updated"  // data: store.Ticket
+	EvProjectCreated = "project.created" // data: store.Project
+	EvItemNew        = "item.new"        // data: store.Item — something needs the boss
+	EvItemResolved   = "item.resolved"   // data: store.Item
 )
-
-// NeedsInput signals that a thread requires the captain's attention.
-type NeedsInput struct {
-	ChannelID string `json:"channel_id"`
-	TaskID    string `json:"task_id,omitempty"`
-	Reason    string `json:"reason"` // gate | question | blocked | failed
-	Summary   string `json:"summary"`
-}
