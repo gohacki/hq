@@ -4,26 +4,93 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/gohacki/shipyard/internal/store"
 )
 
-// escapeHatch opens a tmux window for a task: crewmate resumed interactively
-// in Claude Code on the left, an empty shell in the worktree on the right.
-// The headless process is closed first so exactly one process owns the
-// session; supervision resumes when the window closes.
-func (o *Orch) escapeHatch(taskID string) (string, error) {
+func tmuxAvailable() error {
 	if _, err := exec.LookPath("tmux"); err != nil {
-		return "", fmt.Errorf("tmux not installed")
+		return fmt.Errorf("tmux not installed")
 	}
 	if os.Getenv("TMUX") == "" {
 		// The daemon rarely runs inside tmux; target the client's session via
 		// the default server instead. Requires any tmux server to be up.
 		if err := exec.Command("tmux", "has-session").Run(); err != nil {
-			return "", fmt.Errorf("no tmux server running — start shipyard inside tmux to use the escape hatch")
+			return fmt.Errorf("no tmux server running — start shipyard inside tmux to use the escape hatch")
 		}
+	}
+	return nil
+}
+
+// openEscapeWindow creates the two-pane hatch window: an interactive agent
+// session on the left, a console shell on the right, both cwd'd to dir.
+// tmuxSession targets the caller's tmux session (the daemon usually runs
+// outside tmux, where an untargeted new-window lands in an arbitrary
+// session); "" falls back to tmux's default choice.
+func (o *Orch) openEscapeWindow(tmuxSession, winName, dir, sessionID, model string, extraArgs ...string) error {
+	resume := o.harness.InteractiveCommand(sessionID, model, extraArgs...)
+	target := winName
+	args := []string{"new-window", "-n", winName, "-c", dir}
+	if tmuxSession != "" {
+		args = append(args, "-t", tmuxSession+":")
+		target = tmuxSession + ":" + winName
+	}
+	args = append(args, shellJoin(resume))
+	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
+		return fmt.Errorf("tmux new-window: %w %s", err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("tmux", "split-window", "-h", "-t", target, "-c", dir).CombinedOutput(); err != nil {
+		o.log.Error("escape split failed", "err", err, "out", string(out))
+	}
+	exec.Command("tmux", "select-pane", "-t", target+".0").Run()
+	return nil
+}
+
+// leadEscape opens the channel's lead interactively: its session resumed in
+// Claude Code on the left, a console in the channel's data dir on the right.
+// The headless lead (if warm) is dropped first so one process owns the
+// session; the next channel message resumes it headlessly as usual.
+func (o *Orch) leadEscape(channelID, tmuxSession string) (string, error) {
+	if err := tmuxAvailable(); err != nil {
+		return "", err
+	}
+	ch, err := o.d.Store.ChannelByID(channelID)
+	if err != nil {
+		return "", err
+	}
+	if ch.LeadSessionID == "" {
+		return "", fmt.Errorf("#%s has no lead session yet — message the channel first", ch.Name)
+	}
+	o.dropLead(ch.ID)
+	winName := "sy-lead-" + ch.Name
+	dir := o.d.Paths.ChannelDir(ch.Name)
+	// Same MCP tools as the headless lead, so the interactive session can
+	// delegate tasks too.
+	extra := []string{}
+	if mcp := filepath.Join(dir, "mcp.json"); fileExists(mcp) {
+		extra = append(extra, "--mcp-config", mcp)
+	}
+	if err := o.openEscapeWindow(tmuxSession, winName, dir, ch.LeadSessionID, ch.LeadModel, extra...); err != nil {
+		return "", err
+	}
+	return winName, nil
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// escapeHatch opens a tmux window for a task: crewmate resumed interactively
+// in Claude Code on the left, an empty shell in the worktree on the right.
+// The headless process is closed first so exactly one process owns the
+// session; supervision resumes when the window closes.
+func (o *Orch) escapeHatch(taskID, tmuxSession string) (string, error) {
+	if err := tmuxAvailable(); err != nil {
+		return "", err
 	}
 	t, err := o.d.Store.TaskByID(taskID)
 	if err != nil {
@@ -42,18 +109,11 @@ func (o *Orch) escapeHatch(taskID string) (string, error) {
 	}
 
 	winName := "sy-" + strings.TrimPrefix(t.ID, "tsk_")
-	resume := o.harness.InteractiveCommand(t.SessionID)
-	// Left pane: interactive resume. Right pane: shell in the worktree.
-	cmd := exec.Command("tmux", "new-window", "-n", winName, "-c", t.WorktreePath, shellJoin(resume))
-	if out, err := cmd.CombinedOutput(); err != nil {
+	if err := o.openEscapeWindow(tmuxSession, winName, t.WorktreePath, t.SessionID, o.taskModel(t)); err != nil {
 		t.Status = prev
 		o.d.UpdateTask(t)
-		return "", fmt.Errorf("tmux new-window: %w %s", err, strings.TrimSpace(string(out)))
+		return "", err
 	}
-	if out, err := exec.Command("tmux", "split-window", "-h", "-t", winName, "-c", t.WorktreePath).CombinedOutput(); err != nil {
-		o.log.Error("escape split failed", "err", err, "out", string(out))
-	}
-	exec.Command("tmux", "select-pane", "-t", winName+".0").Run()
 
 	go o.watchEscapeWindow(t, winName, prev)
 	return winName, nil

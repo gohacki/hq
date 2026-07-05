@@ -113,12 +113,17 @@ fable"* — it has the same controls. Models: `sonnet` · `opus` · `fable` ·
 The composer has focus by default; `tab` switches between composer and
 sidebar.
 
+The sidebar lists channels (threads nested under the open one), then a
+**crew** section: the open channel's lead and every live crewmate. `enter`
+on a crew member drops you into their live Claude session in a tmux window
+(console pane alongside) — same as the `t` escape hatch, but agent-centric.
+
 | Key | Where | Does |
 |---|---|---|
 | `tab` | anywhere | toggle composer ↔ sidebar focus |
 | `enter` | composer | send message |
 | `shift+enter` | composer | newline |
-| `enter` | sidebar | open selected channel / thread |
+| `enter` | sidebar | open channel / thread, or a crew member's live session |
 | `j` / `k` (or arrows) | sidebar | move selection |
 | `esc` | anywhere | thread → channel; composer → sidebar |
 | `e` | sidebar focus | edit channel instructions in `$EDITOR` |

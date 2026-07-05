@@ -429,12 +429,24 @@ func (o *Orch) registerHandlers() {
 
 	srv.Handle("task.escape", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
-			TaskID string `json:"task_id"`
+			TaskID      string `json:"task_id"`
+			TmuxSession string `json:"tmux_session"`
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		return o.escapeHatch(p.TaskID)
+		return o.escapeHatch(p.TaskID, p.TmuxSession)
+	})
+
+	srv.Handle("lead.escape", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ChannelID   string `json:"channel_id"`
+			TmuxSession string `json:"tmux_session"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return o.leadEscape(p.ChannelID, p.TmuxSession)
 	})
 
 	srv.Handle("task.handoff", func(ctx context.Context, raw json.RawMessage) (any, error) {

@@ -47,8 +47,15 @@ func ResolveModel(m string) string {
 	}
 }
 
-func (h *Harness) InteractiveCommand(sessionID string) []string {
-	return []string{h.Bin, "--resume", sessionID}
+func (h *Harness) InteractiveCommand(sessionID, model string, extraArgs ...string) []string {
+	if model == "" {
+		model = h.Model
+	}
+	argv := []string{h.Bin, "--resume", sessionID}
+	if model != "" {
+		argv = append(argv, "--model", ResolveModel(model))
+	}
+	return append(argv, extraArgs...)
 }
 
 func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, error) {

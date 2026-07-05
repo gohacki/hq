@@ -59,12 +59,25 @@ const (
 	focusComposer
 )
 
-// sideItem is one row in the sidebar: a channel, or a task thread nested
-// under the open channel.
+type itemKind int
+
+const (
+	itemChannel itemKind = iota
+	itemThread           // task thread nested under the open channel
+	itemHeader           // non-selectable section label
+	itemLead             // crew section: the open channel's lead agent
+	itemCrew             // crew section: a live crewmate (enter = live session)
+)
+
+// sideItem is one row in the sidebar.
 type sideItem struct {
+	kind    itemKind
+	label   string // for itemHeader
 	channel daemon.ChannelView
-	task    *daemon.TaskView // nil for channel rows
+	task    *daemon.TaskView // itemThread / itemCrew
 }
+
+func (it sideItem) selectable() bool { return it.kind != itemHeader }
 
 type model struct {
 	cl *rpc.Client
@@ -78,14 +91,17 @@ type model struct {
 	openChan   string     // channel id whose scroll is shown
 	openThread string     // task id when a thread is open ("" = channel)
 
-	focus    focusArea
-	showHelp bool
-	vp       viewport.Model
-	composer textarea.Model
-	width    int
-	height   int
-	status   string
-	ready    bool
+	focus       focusArea
+	showHelp    bool
+	tmuxSession string // the TUI's own tmux session; escape windows open here
+	mainWidth   int
+	innerH      int
+	vp          viewport.Model
+	composer    textarea.Model
+	width       int
+	height      int
+	status      string
+	ready       bool
 }
 
 func newModel(cl *rpc.Client) *model {
@@ -94,7 +110,13 @@ func newModel(cl *rpc.Client) *model {
 	ta.SetHeight(3)
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
-	return &model{cl: cl, composer: ta, focus: focusComposer}
+	m := &model{cl: cl, composer: ta, focus: focusComposer}
+	if os.Getenv("TMUX") != "" {
+		if out, err := exec.Command("tmux", "display-message", "-p", "#S").Output(); err == nil {
+			m.tmuxSession = strings.TrimSpace(string(out))
+		}
+	}
+	return m
 }
 
 func (m *model) Init() tea.Cmd {
@@ -304,11 +326,13 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		if m.cursor < len(m.items)-1 {
 			m.cursor++
+			m.skipHeader(1)
 		}
 		return m, nil
 	case "k", "up":
 		if m.cursor > 0 {
 			m.cursor--
+			m.skipHeader(-1)
 		}
 		return m, nil
 	case "enter":
@@ -347,14 +371,34 @@ func (m *model) openCursor() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	it := m.items[m.cursor]
-	if it.task != nil {
+	switch it.kind {
+	case itemThread:
 		m.openThread = it.task.ID
-	} else {
+	case itemChannel:
 		m.openChan = it.channel.ID
 		m.openThread = ""
+	case itemLead:
+		return m, m.escapeCmd("lead.escape", map[string]any{"channel_id": it.channel.ID})
+	case itemCrew:
+		return m, m.escapeCmd("task.escape", map[string]any{"task_id": it.task.ID})
+	default:
+		return m, nil
 	}
 	m.focus = focusComposer
 	return m, tea.Batch(m.refresh(), m.composer.Focus())
+}
+
+// escapeCmd asks the daemon to open a live-session tmux window in the TUI's
+// own tmux session.
+func (m *model) escapeCmd(method string, params map[string]any) tea.Cmd {
+	params["tmux_session"] = m.tmuxSession
+	return func() tea.Msg {
+		var win string
+		if err := m.cl.Call(method, params, &win); err != nil {
+			return errMsg{err}
+		}
+		return errMsg{fmt.Errorf("opened tmux window %s", win)} // status line
+	}
 }
 
 func (m *model) openInstructions() (tea.Model, tea.Cmd) {
@@ -377,23 +421,18 @@ func (m *model) openInstructions() (tea.Model, tea.Cmd) {
 }
 
 func (m *model) escapeHatch() (tea.Model, tea.Cmd) {
-	taskID := m.openThread
-	if taskID == "" {
-		if m.cursor < len(m.items) && m.items[m.cursor].task != nil {
-			taskID = m.items[m.cursor].task.ID
+	if m.cursor < len(m.items) {
+		if it := m.items[m.cursor]; it.kind == itemLead {
+			return m, m.escapeCmd("lead.escape", map[string]any{"channel_id": it.channel.ID})
+		} else if it.task != nil {
+			return m, m.escapeCmd("task.escape", map[string]any{"task_id": it.task.ID})
 		}
 	}
-	if taskID == "" {
-		m.status = "open a task thread first (t = drop into crewmate session)"
-		return m, nil
+	if m.openThread != "" {
+		return m, m.escapeCmd("task.escape", map[string]any{"task_id": m.openThread})
 	}
-	return m, func() tea.Msg {
-		var win string
-		if err := m.cl.Call("task.escape", map[string]any{"task_id": taskID}, &win); err != nil {
-			return errMsg{err}
-		}
-		return errMsg{fmt.Errorf("opened tmux window %s", win)} // status line, not an error state
-	}
+	m.status = "select a task or crew member first (t = drop into their session)"
+	return m, nil
 }
 
 // modelCommand implements the composer's /model command:
@@ -474,9 +513,16 @@ const helpBody = `  SHIPYARD HELP                                (any key closes
     assistant that creates channels:
       "new channel myapp with repo ~/code/myapp, delivery local-only"
 
+  SIDEBAR
+    Channels first, with the open channel's task threads nested under it.
+    Below them, the CREW section lists the open channel's lead and every
+    live crewmate — enter on a member drops you straight into their Claude
+    session in a tmux window, console pane alongside.
+
   KEYS
     tab            toggle composer <-> sidebar
-    enter          composer: send · sidebar: open channel/thread
+    enter          composer: send · sidebar: open channel/thread,
+                   or open a crew member's live session
     shift+enter    newline in composer
     j / k, arrows  move sidebar selection
     esc            thread -> channel · composer -> sidebar
@@ -545,10 +591,14 @@ func (m *model) promoteProposal(n int) (tea.Model, tea.Cmd) {
 
 // --- layout & rendering ---
 
-const sidebarWidth = 28
+const sidebarWidth = 24
 
 var (
-	styleSidebar     = lipgloss.NewStyle().Width(sidebarWidth).Padding(0, 1)
+	styleSidebar = lipgloss.NewStyle().Width(sidebarWidth).Padding(0, 1).
+			Border(lipgloss.NormalBorder(), false, true, false, false).
+			BorderForeground(lipgloss.Color("240"))
+	styleFrame       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
+	styleSideHeader  = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
 	styleSideSel     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62"))
 	styleSideChan    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	styleSideTask    = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
@@ -563,15 +613,19 @@ var (
 	styleReport      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
 )
 
+// layout recomputes pane sizes. The outer frame border eats 2 cols/rows and
+// the sidebar's right border 1 col.
 func (m *model) layout() {
-	mainWidth := m.width - sidebarWidth - 1
+	innerW, innerH := m.width-2, m.height-2
+	mainWidth := innerW - sidebarWidth - 1
 	if mainWidth < 20 {
 		mainWidth = 20
 	}
-	vpHeight := m.height - 1 /*header*/ - 5 /*composer*/ - 1 /*status*/
+	vpHeight := innerH - 1 /*header*/ - 5 /*composer*/ - 1 /*status*/
 	if vpHeight < 3 {
 		vpHeight = 3
 	}
+	m.mainWidth, m.innerH = mainWidth, innerH
 	m.vp = viewport.New(mainWidth, vpHeight)
 	m.composer.SetWidth(mainWidth - 2)
 	m.renderMessages()
@@ -580,16 +634,46 @@ func (m *model) layout() {
 
 func (m *model) rebuildSidebar() {
 	m.items = m.items[:0]
+	var open daemon.ChannelView
 	for _, ch := range m.channels {
-		m.items = append(m.items, sideItem{channel: ch})
+		m.items = append(m.items, sideItem{kind: itemChannel, channel: ch})
 		if ch.ID == m.openChan {
+			open = ch
 			for i := range m.tasks {
-				m.items = append(m.items, sideItem{channel: ch, task: &m.tasks[i]})
+				m.items = append(m.items, sideItem{kind: itemThread, channel: ch, task: &m.tasks[i]})
+			}
+		}
+	}
+	// Crew section for the open channel: the lead plus every crewmate with a
+	// live-resumable session. Enter drops into their session in tmux.
+	if open.ID != "" {
+		m.items = append(m.items, sideItem{kind: itemHeader, label: "crew"})
+		m.items = append(m.items, sideItem{kind: itemLead, channel: open})
+		for i := range m.tasks {
+			t := &m.tasks[i]
+			if t.SessionID != "" && !t.Status.Terminal() {
+				m.items = append(m.items, sideItem{kind: itemCrew, channel: open, task: t})
 			}
 		}
 	}
 	if m.cursor >= len(m.items) {
 		m.cursor = max(0, len(m.items)-1)
+	}
+	m.skipHeader(1)
+}
+
+// skipHeader nudges the cursor off non-selectable rows in direction dir.
+func (m *model) skipHeader(dir int) {
+	for m.cursor >= 0 && m.cursor < len(m.items) && !m.items[m.cursor].selectable() {
+		next := m.cursor + dir
+		if next < 0 || next >= len(m.items) {
+			dir = -dir
+			next = m.cursor + dir
+			if next < 0 || next >= len(m.items) {
+				return
+			}
+		}
+		m.cursor = next
 	}
 }
 
@@ -614,10 +698,14 @@ func statusIcon(s store.TaskStatus) string {
 
 func (m *model) sidebarView(height int) string {
 	var b strings.Builder
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render("  shipyard") + "\n\n")
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" ⚓ shipyard") + "\n\n")
 	for i, it := range m.items {
 		var line string
-		if it.task == nil {
+		switch it.kind {
+		case itemHeader:
+			b.WriteString("\n" + styleSideHeader.Render("— "+it.label+" —") + "\n")
+			continue
+		case itemChannel:
 			badge := ""
 			pad := 0
 			if it.channel.Unread > 0 {
@@ -626,7 +714,7 @@ func (m *model) sidebarView(height int) string {
 			}
 			name := "# " + truncate(it.channel.Name, sidebarWidth-4-pad)
 			line = styleSideChan.Render(name) + badge
-		} else {
+		case itemThread:
 			t := it.task
 			badge := ""
 			pad := 0
@@ -636,6 +724,14 @@ func (m *model) sidebarView(height int) string {
 			}
 			name := fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8-pad))
 			line = styleSideTask.Render(name) + badge
+		case itemLead:
+			mdl := it.channel.LeadModel
+			if mdl == "" {
+				mdl = "sonnet"
+			}
+			line = styleSideTask.Render(" ◉ " + truncate("lead · "+mdl, sidebarWidth-6))
+		case itemCrew:
+			line = styleSideTask.Render(fmt.Sprintf(" %s %s", statusIcon(it.task.Status), truncate(it.task.Title, sidebarWidth-7)))
 		}
 		if i == m.cursor && m.focus == focusSidebar {
 			line = styleSideSel.Render(stripANSIPad(line, sidebarWidth-2))
@@ -743,7 +839,7 @@ func (m *model) headerView() string {
 			}
 		}
 	}
-	w := m.width - sidebarWidth - 1
+	w := m.mainWidth
 	if w < 10 {
 		w = 10
 	}
@@ -763,14 +859,13 @@ func (m *model) View() string {
 		m.headerView(),
 		m.vp.View(),
 		m.composer.View(),
-		styleStatus.Render(truncate(status, m.width-sidebarWidth-2)),
+		styleStatus.Render(truncate(status, m.mainWidth-2)),
 	)
 	body := lipgloss.JoinHorizontal(lipgloss.Top,
-		m.sidebarView(m.height),
-		lipgloss.NewStyle().Height(m.height).Render("│"),
-		main,
+		m.sidebarView(m.innerH),
+		lipgloss.NewStyle().Width(m.mainWidth).Height(m.innerH).Render(main),
 	)
-	return body
+	return styleFrame.Render(body)
 }
 
 func max(a, b int) int {
