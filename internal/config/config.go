@@ -2,8 +2,6 @@
 package config
 
 import (
-	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -40,32 +38,6 @@ func (p Paths) Ensure() error {
 		}
 	}
 	return nil
-}
-
-// Settings is the optional user config at <ConfigDir>/config.json.
-type Settings struct {
-	// LeadAllowedTools are extra tool allowlist entries for lead agents
-	// (e.g. "mcp__linear" to let leads read Linear tickets). Leads always
-	// get mcp__shipyard; crewmates are unrestricted in their worktrees.
-	LeadAllowedTools []string `json:"lead_allowed_tools"`
-}
-
-func (p Paths) SettingsPath() string { return filepath.Join(p.ConfigDir, "config.json") }
-
-// LoadSettings reads config.json; a missing file returns zero settings.
-func (p Paths) LoadSettings() (Settings, error) {
-	var s Settings
-	b, err := os.ReadFile(p.SettingsPath())
-	if os.IsNotExist(err) {
-		return s, nil
-	}
-	if err != nil {
-		return s, err
-	}
-	if err := json.Unmarshal(b, &s); err != nil {
-		return s, fmt.Errorf("%s: %w", p.SettingsPath(), err)
-	}
-	return s, nil
 }
 
 func (p Paths) DBPath() string      { return filepath.Join(p.DataDir, "shipyard.db") }

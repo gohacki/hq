@@ -133,15 +133,10 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 	if ch.Name == daemon.HomeChannelName {
 		sysPrompt = homeSystemPrompt()
 	}
-	// Leads are tool-restricted by design (judgment, no shell). Users widen
-	// the allowlist via config.json lead_allowed_tools (e.g. "mcp__linear")
-	// to let leads read tickets etc. from their global MCP servers.
-	allowed := []string{"mcp__shipyard"}
-	if settings, err := o.d.Paths.LoadSettings(); err == nil {
-		allowed = append(allowed, settings.LeadAllowedTools...)
-	} else {
-		o.log.Error("load settings", "err", err)
-	}
+	// Leads get the same full tool access as crewmates (all of the user's
+	// global MCP servers work with zero config — shipyard is drop-in).
+	// "Delegate, never do the labor yourself" is enforced by the system
+	// prompt, not by permissions: it's a role, not a security boundary.
 	sess, err := o.harness.Start(ctx, agent.Spec{
 		Model:           ch.LeadModel,
 		WorkDir:         o.d.Paths.ChannelDir(ch.Name),
@@ -149,7 +144,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 		Prompt:          prompt,
 		ResumeSessionID: ch.LeadSessionID,
 		MCPConfigPath:   mcpPath,
-		AllowedTools:    allowed,
+		Autonomous:      true,
 	})
 	if err != nil && ch.LeadSessionID != "" {
 		// Stale session id (e.g. claude storage cleaned) — start fresh.
@@ -159,7 +154,7 @@ func (o *Orch) startLead(ctx context.Context, ch store.Channel, prompt string) e
 			SystemPrompt:  sysPrompt,
 			Prompt:        prompt,
 			MCPConfigPath: mcpPath,
-			AllowedTools:  allowed,
+			Autonomous:    true,
 		})
 	}
 	if err != nil {

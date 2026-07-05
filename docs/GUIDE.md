@@ -72,8 +72,9 @@ Task kinds:
 
 **Bulk intake:** paste a whole ticket list ("here are 8 Linear tickets: … —
 create a task for each") and the lead fans them out in one shot
-(`create_tasks`). To let leads *pull* tickets themselves, allow your ticket
-tool in `~/.config/shipyard/config.json` (see Configuration below).
+(`create_tasks`) — or, since agents inherit all your globally configured
+Claude MCP servers, just say "pull my open Linear tickets and create a task
+for each" and the lead fetches them itself.
 
 Open a thread (`enter` on it) to watch the crewmate work or steer it
 directly — anything you type there goes to that crewmate. Statuses in the
@@ -163,21 +164,14 @@ a **`refresh_runbook`** tool ("the dev setup changed — refresh the runbook"
 re-scouts and replaces the section), and every crewmate is instructed to
 **fix the runbook in place** if it proves wrong mid-task.
 
-## Configuration
+## External tools (MCP)
 
-Optional `~/.config/shipyard/config.json`:
-
-```json
-{
-  "lead_allowed_tools": ["mcp__linear"]
-}
-```
-
-- `lead_allowed_tools` — extra tool namespaces lead agents may call.
-  Headless agents inherit your global Claude MCP servers automatically;
-  crewmates can use all of them (they run unrestricted in their worktrees),
-  but leads are locked to shipyard's own tools unless you widen this list —
-  e.g. `mcp__linear` lets leads ingest tickets directly.
+shipyard is drop-in: every agent — leads and crewmates — automatically
+inherits whatever MCP servers you've configured globally for Claude Code
+(Linear, Jira, browsers, databases, …). No shipyard configuration needed.
+Leads use them to *read context* (tickets, docs) when writing briefs;
+their "never do the work yourself, always delegate" role is part of their
+standing instructions.
 
 ## CLI reference
 
