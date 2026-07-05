@@ -1,41 +1,41 @@
-# shipyard
+# hq
 
-**Talk to your projects like Slack channels. Ship with a crew of agents.**
+**An engineering department as a program.**
 
-shipyard is a Slack-like terminal UI for running fleets of coding agents.
-Every project you work on is a **channel**. Each channel has a **lead agent**
-you talk to; it delegates work to **crewmate** agents that run autonomously in
-isolated git worktrees ([treehouse](https://github.com/kunchenguid/treehouse))
-and deliver through the [no-mistakes](https://github.com/kunchenguid/no-mistakes)
-validation pipeline. Tasks are **threads**. You have unread badges. It feels
-like Slack, but everyone except you is an agent.
+hq runs a department of AI agents for you: a **PM** that takes intake in the
+Conference Room, an **EM** per project that plans and delegates, and
+**engineers** that work tickets autonomously in isolated git worktrees
+([treehouse](https://github.com/kunchenguid/treehouse)), delivering through
+the [no-mistakes](https://github.com/kunchenguid/no-mistakes) pipeline.
 
-Successor to [firstmate](https://github.com/kunchenguid/firstmate) — same
-ideas, real application: a Go daemon owns the agent lifecycle deterministically
-instead of a 101KB prose spec, and agents speak structured stream-json instead
-of being screen-scraped through tmux.
+You stay in the loop for exactly two things — **planning** and
+**verification** — and out of the loop for everything else. The home screen
+is **My Office**: a decision queue holding only what needs you. Plans arrive
+for review before work starts; finished work arrives as a **demo** with a
+running dev server and copy-paste test steps. Everything in between is
+invisible unless you go looking (the board, ticket timelines, desk visits).
 
 ## Quick start
 
 ```sh
-shipyard            # from anywhere — opens the TUI, auto-starts the daemon
+hq            # from anywhere, inside tmux — opens the TUI, auto-starts the daemon
 ```
 
-No cd-ing into a repo. In `#home`, tell the assistant:
+In the Conference Room, tell the PM:
 
-> new channel beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web
+> new project beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web
 
-Then open `#beta-os` and talk to the lead. It spawns crewmates; each task is a
-thread; press `t` on a thread to drop into the crewmate's live session in
-tmux.
+Then open `#beta-os`, brief the EM, and work your office queue. Press `?`
+for help anywhere.
 
 ## Docs
 
-- **[docs/GUIDE.md](docs/GUIDE.md) — the user guide** (start here; also `?` in
-  the TUI or `shipyard help`)
+- **[docs/GUIDE.md](docs/GUIDE.md) — the user guide** (start here; also `?`
+  in the TUI or `hq help`)
 - [SPEC.md](SPEC.md) — product spec
 - [ARCHITECTURE.md](ARCHITECTURE.md) — implementation design
 
-## Status
+## History
 
-Early — under active construction. See SPEC for v1 scope.
+hq v2 is the company-themed rebuild of shipyard (a Slack-like v1), itself a
+successor to [firstmate](https://github.com/kunchenguid/firstmate).

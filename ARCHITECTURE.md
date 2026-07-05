@@ -1,129 +1,103 @@
-# shipyard — architecture
+# hq — architecture
 
 Go, single binary, three moving parts: **CLI/TUI**, **daemon**, **agent
 subprocesses**. The daemon is the only writer of state; the TUI is a thin
-client.
+client rendering My Office, the board, and project chats from RPC + events.
 
 ```
 ┌────────────┐   unix socket (JSON-RPC + event stream)   ┌──────────────────┐
-│ shipyard   │◄──────────────────────────────────────────►│ shipyard daemon  │
+│ hq         │◄──────────────────────────────────────────►│ hq daemon        │
 │ (Bubble    │                                            │  - SQLite state  │
-│  Tea TUI)  │                                            │  - supervisor    │
-└────────────┘                                            │  - agent runner  │
+│  Tea TUI)  │                                            │  - items engine  │
+└────────────┘                                            │  - supervisor    │
                                                           └───────┬──────────┘
                                                    spawns/owns    │ stdio
                                             ┌─────────────────────┼─────────────┐
                                             ▼                     ▼             ▼
-                                     lead agent (per      crewmate (per    treehouse /
-                                     channel, on-demand,  task, headless   no-mistakes /
-                                     headless claude)     claude in        tmux (CLIs)
-                                                          worktree)
+                                     PM / EMs (per         engineers (per   treehouse /
+                                     project, on-demand,   ticket, headless no-mistakes /
+                                     headless claude)      claude in        tmux (CLIs)
+                                                           worktree)
 ```
 
 ## Directory layout
 
 ```
-cmd/shipyard/          main; subcommands: (default) tui, daemon, channel, task, doctor
-internal/config/       paths (~/.config/shipyard, ~/.local/share/shipyard), settings
-internal/store/        SQLite schema + queries (channels, repos, tasks, messages, reads)
-internal/rpc/          JSON-RPC over unix socket: requests + server-push events
-internal/daemon/       daemon core: lifecycle, supervisor, event bus
-internal/agent/        Harness interface; claude/ adapter (stream-json, resume)
-internal/lead/         lead agent runner: system prompt, MCP tool server
-internal/crew/         crewmate lifecycle: brief building, spawn, supervise, teardown
-internal/worktree/     treehouse CLI wrapper (get --lease / return / status)
-internal/delivery/     delivery modes; no-mistakes gate finding relay
-internal/escape/       tmux escape hatch (window + two panes)
-internal/tui/          Bubble Tea app: sidebar, channel, thread, composer, forms
+cmd/hq/               main; subcommands: (default) tui, daemon, doctor, call, mcp-em
+internal/config/      paths (~/.config/hq, ~/.local/share/hq), env overrides
+internal/store/       SQLite: projects, repos, tickets, messages, reads, items, plans, settings
+internal/rpc/         JSON-RPC over unix socket: requests + server-push events
+internal/daemon/      daemon core: lifecycle, project creation, items engine, presence
+internal/agent/       Harness interface; claude/ adapter (stream-json, resume, models)
+internal/orch/        judgment layer: PM/EM lifecycle (orch.go), engineers (eng.go),
+                      plans/ask_boss/handbook (plans.go), prompts.go, mcpcmd.go,
+                      onboarding.go, visit.go, teardown.go
+internal/mcp/         minimal MCP stdio server (initialize, tools/list, tools/call)
+internal/worktree/    treehouse CLI wrapper (get --lease / return)
+internal/tui/         Bubble Tea app: tui.go (model/update), keys.go, sidebar.go,
+                      office.go (+plan review), board.go, views.go, help.go
 ```
 
 ## State
 
-SQLite at `~/.local/share/shipyard/shipyard.db` (WAL). Daemon is sole writer.
+SQLite at `~/.local/share/hq/hq.db` (WAL). Daemon is sole writer. Tables:
+`projects` (delivery/verify/models/handbook/EM session), `repos`, `tickets`
+(kind build|spike, status, model, worktree, session), `messages`, `reads`,
+`items` (the office queue: kind, tier, resolved_at), `plans`, `settings`
+(presence). Project data dirs are human-readable:
+`projects/<name>/{handbook.md, mcp.json, plan-*.md, tickets/<id>/{brief.md,report.md}}`.
 
-- `channels(id, name, delivery, instructions_path, lead_session_id, created_at)`
-- `repos(id, channel_id, name, path, default_branch)`
-- `tasks(id, channel_id, repo_id, kind ship|scout, title, status, branch,
-  worktree_path, session_id, brief_path, report_path, created_at, updated_at)`
-  - status: `queued|running|needs-input|blocked|delivering|done|failed|abandoned`
-- `messages(id, channel_id, task_id NULL, author kind+name, body, kind
-  text|report|gate|system, created_at)`
-- `reads(scope_id, last_read_message_id)` — unread badges are derived.
+## Items engine (My Office)
 
-Channel data dir `~/.local/share/shipyard/channels/<name>/` holds
-`instructions.md`, per-task `tasks/<id>/{brief.md,report.md}`, lead session
-metadata. Human-readable on purpose.
-
-## Daemon
-
-- `shipyard daemon run` in foreground; the CLI auto-spawns it detached when
-  the socket (`~/.local/share/shipyard/daemon.sock`) is dead. PID + version
-  handshake; stale-socket cleanup.
-- **Event bus**: every state mutation emits an event; TUI subscribes over the
-  socket (`events.subscribe`) and re-renders. Notifications derive from the
-  same events.
-- **Supervisor** (deterministic, zero-token): watches crewmate processes and
-  their stream-json output. Classifies turn-ends: progress (absorb), question
-  / gate / blocked (→ `needs-input`, notify, optionally wake lead), exit
-  (success → delivery/teardown path; failure → surface). Restart-proof: on
-  boot, reconcile db against live processes, treehouse status, and git.
+Every actionable state files an `items` row and publishes `item.new`:
+questions/options (`ask.boss` or engineer `QUESTION:`), plans
+(`plan.propose`), demos (engineer `DEMO:`), blocked/failed, handbook
+proposals. `UpdateTicket` auto-resolves a ticket's open items when it
+returns to running/delivering; office actions resolve explicitly
+(`item.resolve`, `plan.approve`, `handbook.apply`). Tier drives
+notification gating against the presence setting; the queue is durable.
 
 ## Agent layer
 
-`internal/agent.Harness` interface:
+`agent.Harness`/`Session` unchanged from v1: headless
+`claude -p --input-format stream-json --output-format stream-json`,
+`--append-system-prompt` for PM/EM roles, `--resume` for durable memory and
+desk visits, `--model` per spec (default sonnet; `fable`→`claude-fable-5`).
+All agents run `--dangerously-skip-permissions`: engineers are isolated in
+worktrees; the PM/EM delegate-don't-do rule is prompt-enforced.
 
-```go
-type Harness interface {
-    Start(ctx, Spec) (Session, error)   // Spec: cwd, systemPrompt, mcpServers, resumeID
-    // Session: Send(msg), Events() <-chan Event, Interrupt(), SessionID()
-}
-```
+## Orchestration
 
-Claude adapter runs `claude -p --output-format stream-json --input-format
-stream-json --permission-mode acceptEdits ...` (crewmates:
-`--dangerously-skip-permissions` inside their isolated worktree, matching
-firstmate's autonomy model). Session IDs persist in the db → `--resume` gives
-leads durable memory and powers the escape hatch.
+- **PM/EM**: same lifecycle (on-demand, 15-min idle reap, resume-on-wake).
+  The PM is the Conference Room's EM with a different prompt + extra tools.
+  MCP config points at `hq mcp-em --project <id> [--pm]`, whose tools call
+  back into the daemon over the socket.
+- **Engineers**: spawn = ticket row → treehouse lease (fetches origin;
+  fail-closed) → brief file → headless session. Supervision classifies
+  turn-ends by mandatory markers (`DEMO:`/`STATUS:`/`QUESTION:`) —
+  deterministic, no model in the loop — and files office items. Done →
+  worktree auto-return (kept if unlanded work). Failed → retry re-opens
+  with the same brief.
+- **Plans**: `plan.propose` → plans row + office item; `plan.approve`
+  spawns accepted tickets and messages the EM the boss's decisions/answers;
+  `plan.reject` messages the note back.
+- **Onboarding docs**: per-repo cache under `onboarding/`; seeded on
+  project creation (spike if cache miss), `onboarding.refresh` replaces.
 
-## Lead ↔ daemon tools
+## TUI
 
-The daemon exposes an MCP stdio server (`shipyard mcp-lead --channel <id>`,
-spawned per lead) with tools: `create_task`, `list_tasks`, `get_task`,
-`message_task`, `cancel_task`, `read_report`, `read_instructions`,
-`edit_instructions`, `list_repos`, `channel_settings`. The home channel's
-assistant gets `create_channel`, `add_repo`, `set_delivery` instead. Tool
-calls go straight back into the daemon over the same unix socket — the lead
-never runs shell commands against shipyard state.
-
-## Crewmate lifecycle
-
-1. Lead calls `create_task` → daemon leases a worktree: `treehouse get
-   --lease --lease-holder shipyard:<task-id>` in the repo (pool configured by
-   the repo's `treehouse.toml`, seeded on channel creation).
-2. Brief is rendered (task, channel instructions, delivery-mode contract,
-   report contract for scouts) to `tasks/<id>/brief.md`; crewmate spawns
-   headless in the worktree.
-3. Supervisor streams assistant text into the task thread as messages; tool
-   noise is summarized, not mirrored.
-4. Ship + no-mistakes: crewmate commits on a feature branch and drives
-   `no-mistakes axi run`; `ask-user` gate findings post to the thread and
-   block on your reply.
-5. Done: PR link (or merge/report) posted; worktree returned via `treehouse
-   return --force` **only after landed-work checks pass** (firstmate's
-   fail-closed teardown rule).
-
-## Escape hatch
-
-`t` on a thread → `tmux new-window -n sy:<task>` with left pane `claude
---resume <session-id>` (cwd = worktree) and right pane `$SHELL` (cwd =
-worktree). Daemon marks the task `attached` and pauses headless sends; when
-the window closes (polled via tmux), supervision resumes on the same session.
-Requires running inside tmux; the keybinding errors gracefully otherwise.
+One Bubble Tea model with four screens (office/chat/plan/board) + help
+overlay. Sidebar: my office (interrupt badge), board, conference room,
+projects (ticket threads nest under the open one; staff = EM + live
+engineers, enter = desk visit). Ticket chats render as timelines (engineer
+text collapsed to first lines; `x` expands). Presence cycles with `M`;
+notifications are osascript desktop alerts gated by tier.
 
 ## Testing
 
-- Store + supervisor: pure Go unit tests (supervisor classification is
-  table-driven — the part firstmate could never test).
-- Agent adapter: golden stream-json fixtures; a `fakeharness` binary for e2e.
-- TUI: teatest golden-frame tests.
-- Repo gates itself with no-mistakes once bootstrapped.
+- store: schema round-trips, items lifecycle, plans, settings.
+- daemon e2e: real socket — boot, conference room, project create,
+  messages/events, items file→auto-resolve, presence validation.
+- orch: marker classification, proposed-ticket parsing, teardown safety
+  (unlandedWork against real git repos).
+- Live verification: fake repos + Sonnet fleet driven over tmux.

@@ -1,5 +1,5 @@
 // Package mcp is a minimal Model Context Protocol stdio server — just enough
-// for Claude Code to call shipyard's lead tools (initialize, tools/list,
+// for Claude Code to call hq's manager tools (initialize, tools/list,
 // tools/call over JSON-RPC 2.0, newline-delimited).
 package mcp
 

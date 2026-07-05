@@ -1,4 +1,4 @@
-// Package agent defines the harness abstraction shipyard uses to run coding
+// Package agent defines the harness abstraction hq uses to run coding
 // agents. Claude Code is the v1 implementation; other harnesses plug in
 // behind the same interface.
 package agent

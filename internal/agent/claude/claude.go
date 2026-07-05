@@ -19,9 +19,9 @@ import (
 type Harness struct {
 	// Bin overrides the claude binary path (tests use a fake).
 	Bin string
-	// Model is the fleet-wide default. Shipyard defaults to sonnet — cheap
-	// and fast; upgrade specific leads/crewmates on the fly with /model or
-	// by asking the lead. SHIPYARD_MODEL still overrides the default.
+	// Model is the department-wide default. hq defaults to sonnet — cheap
+	// and fast; upgrade specific agents on the fly with /model or by asking
+	// the EM. HQ_MODEL overrides the default.
 	Model string
 }
 
@@ -29,7 +29,7 @@ type Harness struct {
 const DefaultModel = "sonnet"
 
 func New() *Harness {
-	model := os.Getenv("SHIPYARD_MODEL")
+	model := os.Getenv("HQ_MODEL")
 	if model == "" {
 		model = DefaultModel
 	}

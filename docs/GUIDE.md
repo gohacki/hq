@@ -1,222 +1,190 @@
-# shipyard user guide
+# hq user guide
 
-Everything you need to run a fleet. For the product rationale see
+Everything you need to run your department. For rationale see
 [SPEC.md](../SPEC.md); for internals see [ARCHITECTURE.md](../ARCHITECTURE.md).
 
 ## The mental model
 
-shipyard looks like Slack, but everyone except you is an agent:
+hq is an engineering department where everyone except you is an agent:
 
-| Slack thing | shipyard thing |
+| Company thing | hq thing |
 |---|---|
-| Workspace | your machine (one daemon, one TUI) |
-| Channel | a **project** — one or more git repos |
-| The person you DM in a channel | the channel's **lead agent** (delegates, never codes) |
-| Thread | a **task** — one crewmate working in an isolated git worktree |
-| Thread participants | the **crewmate** (autonomous coding agent) + you |
-| `#general` | `#home` — the assistant that creates channels |
-| Unread badge | messages you haven't seen; red = someone needs you |
+| You | the boss — your surface is **My Office** |
+| PM | one global agent in the **Conference Room**: intake, creates projects, knows everything |
+| A project team | a **project** — one or more git repos, an EM, engineers |
+| EM | the agent you brief per project; plans and delegates, never codes |
+| Engineer | an autonomous agent working one **ticket** in an isolated git worktree |
+| Ticket | unit of work: **build** (ship a change) or **spike** (investigate → report) |
+| Team handbook | per-project doc injected into every engineer brief |
+| Sitting at someone's desk | **desk visit** — their live Claude session in tmux |
 
-You are "the captain". You talk; leads decompose and delegate; crewmates do
-the work in [treehouse](https://github.com/kunchenguid/treehouse) worktrees
-and deliver through the channel's delivery mode.
+The core promise: **you're involved in planning and verification; everything
+else stays out of sight** until it lands in your office queue.
 
 ## Install & start
 
 ```sh
-go build -o ~/.local/bin/shipyard ./cmd/shipyard   # from the repo
-shipyard doctor    # checks claude, tmux, treehouse, no-mistakes, git
-shipyard           # opens the TUI from anywhere; auto-starts the daemon
+go build -o ~/.local/bin/hq ./cmd/hq   # from the repo
+hq doctor    # checks claude, tmux, treehouse, no-mistakes, git
+hq           # opens the TUI from anywhere; auto-starts the daemon
 ```
 
-Run inside **tmux** if you want the escape hatch (`t`). Quitting the TUI
-stops nothing — the daemon and every crewmate keep working; run `shipyard`
-again to reattach.
+Run inside **tmux** for desk visits. Quitting the TUI stops nothing — the
+department keeps working; run `hq` again to reattach.
 
-## Creating a channel
+## Creating a project
 
-Open `#home` and say what you want:
+Open the Conference Room (sidebar) and tell the PM:
 
-> new channel beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web,
+> new project beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web,
 > delivery no-mistakes, verify before-delivery
 
-The assistant registers the repos (each gets a treehouse pool), seeds the
-channel instructions doc, and auto-spawns a **dev-runbook scout** per repo
-that documents how local development works — including how to run several
-dev servers from different worktrees at once — into the channel
-instructions. Every future crewmate inherits that knowledge.
+Settings (editable later by asking the EM):
 
-Settings you pick at creation (all editable later by asking the lead):
+- **delivery** — how build tickets land: `no-mistakes` (default: full
+  validation pipeline → push → PR → CI) · `direct-pr` · `local-only`.
+- **verify** — when engineers hand you a demo: `on-completion` (default) ·
+  `before-delivery` · `none`.
 
-- **delivery** — how ship tasks land:
-  - `no-mistakes` (default): full validation pipeline → push → PR → CI.
-  - `direct-pr`: branch, push, draft PR. No gate.
-  - `local-only`: branch + commit only; you merge by hand.
-- **verify** — when crewmates hand work back for your manual check:
-  - `on-completion` (default): after delivery, before the task closes.
-  - `before-delivery`: after implementing, before any push/PR.
-  - `none`: no handback.
+Project creation auto-runs an **onboarding spike** per repo that documents
+local development in the team handbook — including how to run several dev
+servers from different worktrees at once (that's what makes demos work).
+Onboarding docs are cached per repo across projects; say "the dev setup
+changed" to the EM to refresh one.
 
-## Working in a channel
+## The flow
 
-Type in the composer to talk to the **lead**. Ask for anything: "fix the
-login redirect", "what's in flight?", "investigate why CI is slow". The lead
-creates tasks; each becomes a **thread** nested under the channel in the
-sidebar.
+1. **Brief the EM** in the project chat: "we need rate limiting on the API".
+2. For anything non-trivial the EM **proposes a plan** — it lands in My
+   Office. Open it: the doc, proposed tickets, open questions. `space`
+   toggles tickets in/out, `enter` answers a question, `A` approves (the
+   checked tickets spawn), `R` requests changes.
+3. Engineers work autonomously. Watch the **board** (`b`) if curious, or a
+   ticket's **timeline** (agent chatter collapsed to first lines; `x`
+   expands the full chat). Reply in a thread to steer an engineer directly.
+4. When an engineer finishes, a **demo** card appears: what changed, exact
+   copy-paste test steps, a dev server running from its own worktree with
+   the URL. Test it; `a` approves (the engineer completes and its worktree
+   is recycled). The server stays up until you approve.
+5. Questions, blockers, and failures also queue as cards — answer inline,
+   pick an option with `1-9`, `v` to sit at the desk, or `r` to retry a
+   failed ticket fresh.
 
-Task kinds:
-- **ship** — delivers a code change through the delivery mode.
-- **scout** — investigates and posts a **report** into the thread. Reports
-  end with proposed follow-up tasks: press `1`–`9` in the thread to promote
-  one into a ship task (the report rides along as context).
+**Bulk intake:** paste a ticket list to an EM ("create a ticket for each"),
+or — since agents inherit all your global Claude MCP servers — tell the PM
+"pull my open Linear tickets and sort them into projects".
 
-**Bulk intake:** paste a whole ticket list ("here are 8 Linear tickets: … —
-create a task for each") and the lead fans them out in one shot
-(`create_tasks`) — or, since agents inherit all your globally configured
-Claude MCP servers, just say "pull my open Linear tickets and create a task
-for each" and the lead fetches them itself.
+## My Office
 
-Open a thread (`enter` on it) to watch the crewmate work or steer it
-directly — anything you type there goes to that crewmate. Statuses in the
-sidebar: `●` running · `✋` needs you · `🚀` delivering · `⌨` attached ·
-`✓` done · `✗` failed.
+Cards in two bands: **needs you now** (plans, questions, options, blockers,
+failures) and **when you have a minute** (demos, handbook edits). Per card:
 
-### Verification handback
+| Key | Does |
+|---|---|
+| `j` / `k` | move between cards |
+| `enter` | open: plan → review screen · options → arm `1-9` · else the thread |
+| `a` | approve — demo: tells the engineer to finish · handbook: applies the edit |
+| `o` | open the thread behind the card |
+| `v` | desk visit |
+| `r` | retry a failed ticket (fresh engineer, same brief) |
+| `x` | dismiss |
 
-With verify on, a ship crewmate will stop at the configured stage and post:
-what changed, exact copy-paste test instructions, and — if the project has a
-dev server — a **running server started from its own worktree on a unique
-port**, URL included. The task parks (red badge + notification) until you
-answer in the thread. The worktree (and your test server) stays alive until
-you approve; only then does it report done and release the worktree.
+Items resolve themselves when the underlying ticket moves on.
 
-### Questions and gates
+## Presence (`M`)
 
-Whenever a crewmate hits something only you can decide — a question, a
-blocker, or an `ask-user` finding from the no-mistakes gate — the thread
-goes `✋ needs-input`, the channel badge lights up, and you get a desktop
-notification. Reply in the thread to unblock it.
+- 🟢 **available** — notified of interrupts + demos/handbook edits
+- 🎧 **heads-down** — notified of interrupts only
+- 👀 **review** — notified of everything
+
+Notifications are macOS desktop alerts; the office queue always holds
+everything regardless of mode.
+
+## Keybindings (everywhere)
+
+| Key | Does |
+|---|---|
+| `tab` | cycle sidebar ↔ main/composer |
+| `?` or `/help` | help overlay |
+| `b` | department board (h/l/j/k + enter) |
+| `M` | cycle presence |
+| `v` / `t` | desk visit for the selected agent/ticket |
+| `e` | edit the team handbook in `$EDITOR` |
+| `x` | in a ticket thread: expand/collapse full chat |
+| `1-9` | in a spike thread: promote a proposed ticket |
+| `esc` | back (thread → project → office) |
+| `q` / `ctrl+c` | quit the TUI (department keeps running) |
+
+Composer commands: `/model [em|eng] <sonnet|opus|fable|haiku>` (scope-aware:
+project chat = EM, ticket thread = that engineer), `/help`.
 
 ## Models
 
-Everything runs on **sonnet** by default (cheap, fast). Upgrade or
-downgrade any agent on the fly — switches resume the same session, so no
-context is lost:
+Everyone defaults to **sonnet**. Upgrade/downgrade live — switches resume
+the same session, nothing lost: `/model opus`, or just tell the EM
+("upgrade yourself to fable", "run the next ticket on opus"). Per-ticket
+models via the EM's create_ticket. `HQ_MODEL` overrides the department
+default at daemon start.
 
-```
-/model                 show current models for what you're looking at
-/model opus            channel view → upgrade the lead; thread → that crewmate
-/model crew haiku      default for this channel's future crewmates
-/model lead fable      explicit lead switch from anywhere in the channel
-```
+## Desk visits
 
-Or just tell the lead: *"upgrade yourself to opus"*, *"run the next task on
-fable"* — it has the same controls. Models: `sonnet` · `opus` · `fable` ·
-`haiku` (full `claude-*` ids also accepted).
+`v` opens a tmux window: the agent's session resumed in the full interactive
+Claude Code UI (left, on its own model — EMs bring their hq tools) and a
+console in its working directory (right). While you're there, headless
+supervision pauses; close the window and your next message resumes it.
 
-## Keybindings
+## The handbook learns
 
-The composer has focus by default; `tab` switches between composer and
-sidebar.
-
-The sidebar lists channels (threads nested under the open one), then a
-**crew** section: the open channel's lead and every live crewmate. `enter`
-on a crew member drops you into their live Claude session in a tmux window
-(console pane alongside) — same as the `t` escape hatch, but agent-centric.
-
-| Key | Where | Does |
-|---|---|---|
-| `tab` | anywhere | toggle composer ↔ sidebar focus |
-| `enter` | composer | send message |
-| `shift+enter` | composer | newline |
-| `enter` | sidebar | open channel / thread, or a crew member's live session |
-| `j` / `k` (or arrows) | sidebar | move selection |
-| `esc` | anywhere | thread → channel; composer → sidebar |
-| `e` | sidebar focus | edit channel instructions in `$EDITOR` |
-| `t` | sidebar focus | escape hatch: tmux window with the crewmate live |
-| `1`–`9` | thread, sidebar focus | promote scout proposal N to a ship task |
-| `g` / `G` | sidebar focus | scroll to top / bottom |
-| `ctrl+d` / `ctrl+u` | sidebar focus | scroll half page |
-| `?` | sidebar focus | help overlay (also `/help` in the composer) |
-| `q` / `ctrl+c` | sidebar focus / anywhere | quit TUI (fleet keeps running) |
-
-Composer commands: `/model …` (above), `/help`.
-
-## The escape hatch
-
-`t` on a task thread opens a new tmux window: **left**, the crewmate's
-session resumed in the full interactive Claude Code UI — its entire history
-and context, yours to drive; **right**, a shell in its worktree. While
-attached, headless supervision pauses (status `⌨`). Close the window and the
-task parks; your next message in the thread resumes the same session
-headlessly.
-
-## Channel instructions
-
-Each channel has an instructions doc injected into the lead and every
-crewmate brief: conventions, goals, constraints, plus the auto-generated
-"Local development" sections. Edit it by telling the lead ("add: always run
-migrations locally first") or press `e` to open it in your editor.
-
-Runbooks stay current three ways: they're **cached per repo** (a repo
-scouted by one channel is copied, not re-scouted, by the next), the lead has
-a **`refresh_runbook`** tool ("the dev setup changed — refresh the runbook"
-re-scouts and replaces the section), and every crewmate is instructed to
-**fix the runbook in place** if it proves wrong mid-task.
-
-## External tools (MCP)
-
-shipyard is drop-in: every agent — leads and crewmates — automatically
-inherits whatever MCP servers you've configured globally for Claude Code
-(Linear, Jira, browsers, databases, …). No shipyard configuration needed.
-Leads use them to *read context* (tickets, docs) when writing briefs;
-their "never do the work yourself, always delegate" role is part of their
-standing instructions.
+When you state a durable convention ("we never use raw SQL here"), the EM
+proposes a handbook edit — a card in your office with the new text; `a`
+applies it. Engineers also fix stale "Local development" sections in place
+when they trip over them. Over time the handbook becomes your department's
+accumulated training.
 
 ## CLI reference
 
 ```
-shipyard              open the TUI (auto-starts the daemon)
-shipyard daemon run   run the daemon in the foreground (debugging)
-shipyard doctor       check required external tools
-shipyard call <method> [json]   raw RPC to the daemon (scripting/debugging)
-shipyard help         this, in short form
+hq                       open the TUI (auto-starts the daemon)
+hq daemon run            run the daemon in the foreground (debugging)
+hq doctor                check required external tools
+hq call <method> [json]  raw RPC to the daemon (scripting/debugging)
+hq help                  short help
 ```
 
-`shipyard call` examples:
+`hq call` examples:
 
 ```sh
-shipyard call channels.list
-shipyard call tasks.list '{"channel_id":"ch_…"}'
-shipyard call model.set '{"channel_id":"ch_…","scope":"lead","model":"opus"}'
+hq call projects.list
+hq call items.list
+hq call tickets.list '{"project_id":"prj_…"}'
+hq call model.set '{"project_id":"prj_…","scope":"em","model":"opus"}'
 ```
 
 ## Where things live
 
 | Path | What |
 |---|---|
-| `~/.local/share/shipyard/shipyard.db` | all state (channels, tasks, messages) |
-| `~/.local/share/shipyard/channels/<name>/` | instructions.md, per-task briefs & reports |
-| `~/.local/share/shipyard/logs/daemon.log` | daemon log |
-| `~/.local/share/shipyard/daemon.sock` | RPC socket |
+| `~/.local/share/hq/hq.db` | all state (projects, tickets, messages, items, plans) |
+| `~/.local/share/hq/projects/<name>/` | handbook.md, plan docs, per-ticket briefs & reports |
+| `~/.local/share/hq/onboarding/` | per-repo cached onboarding docs |
+| `~/.local/share/hq/logs/daemon.log` | daemon log |
 | `~/.treehouse/…` | worktree pools (managed by treehouse) |
 
-Env overrides: `SHIPYARD_DATA_DIR`, `SHIPYARD_CONFIG_DIR`, `SHIPYARD_MODEL`
-(fleet default model).
+Env overrides: `HQ_DATA_DIR`, `HQ_CONFIG_DIR`, `HQ_MODEL` (department-wide
+model default).
 
 ## Troubleshooting
 
-- **"daemon did not come up"** — check `~/.local/share/shipyard/logs/daemon.log`.
-  A stale socket is replaced automatically; a second daemon refuses to start.
-- **Escape hatch errors** — you need a running tmux server (start shipyard
-  inside tmux).
-- **Crewmate parked after a restart** — daemon restarts park in-flight tasks
-  (`needs-input`, with a system message). Reply in the thread; the session
-  resumes where it left off.
-- **"worktree kept (uncommitted changes)"** — shipyard refuses to recycle a
-  worktree holding unlanded work. Inspect it (path is in the message), then
-  commit/discard and tell the lead, or return it yourself with
-  `treehouse return --force <path>` from the repo.
-- **Everything is stuck / start fresh** — `pkill -f "shipyard daemon"`, then
-  (optionally) delete `~/.local/share/shipyard`. Repos are never touched;
-  crewmate branches live in your repos' refs.
+- **"daemon did not come up"** — check `~/.local/share/hq/logs/daemon.log`.
+- **Desk visit errors** — you need a running tmux server (start hq inside
+  tmux).
+- **Ticket parked after a restart** — daemon restarts park in-flight
+  tickets (a card appears). Reply in the thread; the session resumes.
+- **"worktree kept (uncommitted changes)"** — hq refuses to recycle a
+  worktree holding unlanded work. Inspect it (path in the message), then
+  commit/discard, or return it with `treehouse return --force <path>`.
+- **Worktree lease fails with "could not resolve host"** — treehouse
+  fetches origin when leasing; you're offline/off-VPN. Reconnect and `r`
+  retry the ticket.
+- **Start fresh** — `pkill -f "hq daemon"`, delete `~/.local/share/hq`.
+  Repos are never touched; engineer branches live in your repos' refs.
