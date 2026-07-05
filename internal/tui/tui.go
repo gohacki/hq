@@ -79,6 +79,7 @@ type model struct {
 	openThread string     // task id when a thread is open ("" = channel)
 
 	focus    focusArea
+	showHelp bool
 	vp       viewport.Model
 	composer textarea.Model
 	width    int
@@ -231,6 +232,23 @@ func notifyCmd(n rpc.NeedsInput) tea.Cmd {
 }
 
 func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Help overlay swallows keys until dismissed.
+	if m.showHelp {
+		switch k.String() {
+		case "ctrl+d", "ctrl+u", "pgdown", "pgup", "j", "k", "down", "up", "g", "G":
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(k)
+			return m, cmd
+		case "ctrl+c":
+			return m, tea.Quit
+		default:
+			m.showHelp = false
+			m.renderMessages()
+			m.vp.GotoBottom()
+			return m, nil
+		}
+	}
+
 	// Global keys.
 	switch k.String() {
 	case "ctrl+c":
@@ -256,6 +274,10 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.composer.Reset()
 			if strings.HasPrefix(body, "/model") {
 				return m, m.modelCommand(strings.Fields(body)[1:])
+			}
+			if body == "/help" || body == "/?" {
+				m.openHelp()
+				return m, nil
 			}
 			return m, m.send(body)
 		case "shift+enter", "alt+enter":
@@ -303,6 +325,9 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.escapeHatch()
 	case "1", "2", "3", "4", "5", "6", "7", "8", "9":
 		return m.promoteProposal(int(k.String()[0] - '0'))
+	case "?":
+		m.openHelp()
+		return m, nil
 	case "g":
 		m.vp.GotoTop()
 		return m, nil
@@ -432,6 +457,60 @@ func (m *model) modelCommand(args []string) tea.Cmd {
 		return errMsg{fmt.Errorf("%s", out)} // status line
 	}
 }
+
+// openHelp shows the help overlay in the message viewport.
+func (m *model) openHelp() {
+	m.showHelp = true
+	m.vp.SetContent(helpBody)
+	m.vp.GotoTop()
+}
+
+const helpBody = `  SHIPYARD HELP                                (any key closes; j/k scroll)
+
+  THE MODEL
+    Channels are projects (one or more git repos). Each channel has a lead
+    agent — talk to it in the channel; it delegates tasks to crewmate agents
+    working in isolated git worktrees. Every task is a thread. #home is the
+    assistant that creates channels:
+      "new channel myapp with repo ~/code/myapp, delivery local-only"
+
+  KEYS
+    tab            toggle composer <-> sidebar
+    enter          composer: send · sidebar: open channel/thread
+    shift+enter    newline in composer
+    j / k, arrows  move sidebar selection
+    esc            thread -> channel · composer -> sidebar
+    e              edit channel instructions in $EDITOR
+    t              escape hatch: tmux window, crewmate live (left) +
+                   worktree shell (right); close window to hand back
+    1-9            in a scout thread: promote proposal N to a ship task
+    g / G          scroll top / bottom     ctrl+d / ctrl+u  half page
+    ?  or /help    this overlay
+    q / ctrl+c     quit the TUI (daemon + crewmates keep running)
+
+  COMPOSER COMMANDS
+    /model                     show models for what you're looking at
+    /model opus                channel: upgrade lead · thread: that crewmate
+    /model crew haiku          default for future crewmates in this channel
+    /model lead fable          explicit lead switch
+    Models: sonnet (fleet default) · opus · fable · haiku. Switches resume
+    the same session — no context lost. Or just ask the lead in chat.
+
+  TASKS
+    ship   delivers a change via the channel's delivery mode
+           (no-mistakes pipeline | direct-pr | local-only)
+    scout  investigates; posts a report with proposed follow-ups (1-9)
+    Status: ● running  ✋ needs you  🚀 delivering  ⌨ attached  ✓ done  ✗ failed
+
+  VERIFICATION
+    With channel verify on (default on-completion), ship crewmates stop and
+    hand you test instructions — dev server running from their worktree on a
+    unique port — and wait for your sign-off in the thread before closing.
+
+  MORE
+    shipyard help          CLI summary
+    docs/GUIDE.md          the full user guide
+    Channel settings (delivery, verify, models, repos): ask the lead.`
 
 // promoteProposal converts proposal N of the open scout thread's report into
 // a ship task (scout→ship handoff).
@@ -618,7 +697,7 @@ func authorStyle(author string) (string, lipgloss.Style) {
 }
 
 func (m *model) renderMessages() {
-	if m.vp.Width == 0 {
+	if m.vp.Width == 0 || m.showHelp {
 		return
 	}
 	var b strings.Builder
@@ -675,7 +754,7 @@ func (m *model) View() string {
 	if !m.ready {
 		return "loading…"
 	}
-	help := "tab: focus · enter: open/send · esc: back · e: instructions · t: tmux hatch · 1-9: promote proposal · q: quit"
+	help := "?: help · tab: focus · enter: open/send · esc: back · e: instructions · t: tmux hatch · 1-9: promote · /model · q: quit"
 	status := m.status
 	if status == "" {
 		status = help

@@ -57,10 +57,42 @@ func run(args []string) error {
 		return runCall(paths, args[1:])
 	case "mcp-lead":
 		return orch.RunLeadMCP(paths, args[1:])
+	case "help", "--help", "-h":
+		fmt.Print(helpText)
+		return nil
 	default:
+		fmt.Print(helpText)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
+
+const helpText = `shipyard — a Slack-like TUI for commanding fleets of coding agents.
+
+Usage:
+  shipyard                       open the TUI (auto-starts the daemon)
+  shipyard daemon run            run the daemon in the foreground
+  shipyard doctor                check required external tools
+  shipyard call <method> [json]  raw RPC to the daemon (scripting/debugging)
+  shipyard help                  this help
+
+The one-minute tour:
+  Channels are projects (one or more git repos). Talk to each channel's lead
+  agent; it delegates tasks to crewmate agents working in isolated git
+  worktrees. Tasks are threads. Create channels by talking to #home:
+    "new channel myapp with repo ~/code/myapp, delivery local-only"
+
+In the TUI:
+  tab        toggle composer <-> sidebar        enter  open / send
+  j/k        move selection                     esc    back
+  e          edit channel instructions          t      tmux escape hatch
+  1-9        promote scout proposal             ?      full help overlay
+  /model     switch models on the fly           q      quit (fleet keeps running)
+
+Everything runs on sonnet by default; upgrade any agent live with /model or
+by asking the lead ("upgrade yourself to opus").
+
+Full guide: docs/GUIDE.md in the repo, or https://github.com/gohacki/shipyard
+`
 
 func runDaemon(paths config.Paths) error {
 	if err := os.MkdirAll(paths.LogDir(), 0o755); err != nil {

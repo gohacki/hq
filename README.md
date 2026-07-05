@@ -31,6 +31,8 @@ tmux.
 
 ## Docs
 
+- **[docs/GUIDE.md](docs/GUIDE.md) — the user guide** (start here; also `?` in
+  the TUI or `shipyard help`)
 - [SPEC.md](SPEC.md) — product spec
 - [ARCHITECTURE.md](ARCHITECTURE.md) — implementation design
 
