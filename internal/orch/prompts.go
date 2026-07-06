@@ -269,7 +269,8 @@ section if none).
 		case "no-mistakes":
 			sb.WriteString(`## Deliverable: shipped change (no-mistakes pipeline)
 
-Create a feature branch, implement, commit. Then validate and deliver with
+Implement and commit ON YOUR WORKTREE'S CURRENT BRANCH (hq/<ticket> — never
+create another branch). Then validate and deliver with
 the no-mistakes pipeline: run ` + "`no-mistakes axi run --intent \"<rich intent>\"`" + `
 and drive its gates (respond with ` + "`no-mistakes axi respond`" + `). The run
 blocks synchronously and can take many minutes — keep waiting on it; NEVER
@@ -281,13 +282,15 @@ QUESTION (see protocol below) — never decide ask-user findings yourself.
 		case "direct-pr":
 			sb.WriteString(`## Deliverable: pull request
 
-Create a feature branch, implement, commit, push, and open a draft PR with
+Implement and commit ON YOUR WORKTREE'S CURRENT BRANCH (hq/<ticket> — never
+create another branch), push it, and open a draft PR with
 the repo's usual tooling. Include the PR URL in your final message.
 `)
 		default: // local-only
 			sb.WriteString(`## Deliverable: local branch
 
-Create a feature branch, implement, commit. Do NOT push or open a PR; the
+Implement and commit ON YOUR WORKTREE'S CURRENT BRANCH (hq/<ticket> — never
+create another branch). Do NOT push or open a PR; the
 boss merges locally. Name the branch in your final message.
 `)
 		}
