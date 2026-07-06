@@ -57,6 +57,8 @@ func run(args []string) error {
 		return runCall(paths, args[1:])
 	case "mcp-em":
 		return orch.RunEMMCP(paths, args[1:])
+	case "chat-header":
+		return runChatHeader(paths, args[1:])
 	case "help", "--help", "-h":
 		fmt.Print(helpText)
 		return nil
@@ -76,16 +78,17 @@ Usage:
   hq help                  this help
 
 The one-minute tour:
-  You are the boss. The PM in the Conference Room creates projects ("new
-  project myapp with repo ~/code/myapp"). Each project has an EM that plans
-  and delegates tickets to engineer agents working in isolated git
-  worktrees. Everything that needs YOU — plan reviews, demos, questions —
-  queues in MY OFFICE, the home screen. Everything else stays out of sight.
+  You are the boss. The ◆ hq intake EM creates projects ("new project myapp
+  with repo ~/code/myapp"). Each project has an EM that plans and delegates
+  tickets to engineer agents working in isolated git worktrees. The home
+  screen is the KANBAN BOARD; everything that needs YOU — plan reviews,
+  demos, questions — is pinned in the sidebar's ⚠ NEEDS YOU inbox. Opening
+  a ticket is a chat with the EM and its engineer.
 
-In the TUI:
-  j/k + enter  work the office queue      a      approve demo/handbook edit
-  b            department board           v      visit an agent's desk (tmux)
-  tab          sidebar (PM, projects)     M      presence (heads-down/avail/review)
+In the TUI (vim-native):
+  h/l/j/k gg G enter   move / open        a      approve demo/handbook edit
+  b            board (home)               v      attach a live session (tmux window)
+  / and :      search / command line      M      presence (heads-down/avail/review)
   ?            full help overlay          q      quit (the department keeps working)
 
 Everyone runs sonnet by default; upgrade any agent live with /model or by
@@ -180,10 +183,9 @@ func runCall(paths config.Paths, args []string) error {
 func runDoctor() error {
 	tools := []struct{ name, why string }{
 		{"claude", "agent harness (required)"},
-		{"tmux", "desk visits (required for v)"},
-		{"treehouse", "worktree pools (required for engineers)"},
+		{"tmux", "live agent sessions (required for chat's v/t — run hq inside it)"},
 		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)"},
-		{"git", "everything"},
+		{"git", "worktrees + everything else"},
 	}
 	ok := true
 	for _, t := range tools {

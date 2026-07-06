@@ -33,7 +33,11 @@ internal/orch/        judgment layer: PM/EM lifecycle (orch.go), engineers (eng.
                       plans/ask_boss/handbook (plans.go), prompts.go, mcpcmd.go,
                       onboarding.go, visit.go, teardown.go
 internal/mcp/         minimal MCP stdio server (initialize, tools/list, tools/call)
-internal/worktree/    treehouse CLI wrapper (get --lease / return)
+internal/worktree/    native git worktrees: one set per ticket (a tree per project
+                      repo) under <data>/worktrees/<ticket>/<repo>, branch hq/<ticket>,
+                      env-file copy; refs shared with the user's repo
+internal/playbook/    per-project SDLC capture: playbook.md (prose) + playbook.json
+                      (per-repo machine recipe), written by the EM's setup interview
 internal/tui/         Bubble Tea app: tui.go (model/update), keys.go, sidebar.go,
                       office.go (+plan review), board.go, views.go, help.go
 ```
@@ -86,12 +90,29 @@ worktrees; the PM/EM delegate-don't-do rule is prompt-enforced.
 
 ## TUI
 
-One Bubble Tea model with four screens (office/chat/plan/board) + help
-overlay. Sidebar: my office (interrupt badge), board, conference room,
-projects (ticket threads nest under the open one; staff = EM + live
-engineers, enter = desk visit). Ticket chats render as timelines (engineer
-text collapsed to first lines; `x` expands). Presence cycles with `M`;
+One Bubble Tea model with three screens (board/chat/plan) + help overlay
+and the attach picker. The board (kanban) is home, scoped by the sidebar's
+project rows. Sidebar sections: ⚠ needs-you inbox (open items, one-key
+a/r/d), projects (tickets nest under the focused one), staff (EM + live
+engineers). Vim layer in `internal/tui/vim.go`: gg/G, `/` search with n/N,
+`:` command line, h/l focus movement. Presence cycles with `M`;
 notifications are osascript desktop alerts gated by tier.
+
+Chat is the hq-rendered thread (`chatContent`): boss/EM/engineer messages
+with `system`-kind rows drawn as one-line interleaved event markers, a
+two-line metadata header for tickets, and a pending-decision banner above
+the composer (approve/retry/dismiss/options — same actions as the inbox).
+Sessions stay headless; messages route through `message.send` as always.
+
+Attaching (`v`) opens the picker (EM + live engineers), then
+`session.checkout` hands over the argv+dir and `internal/tui/tmuxwin.go`
+opens a NEW tmux window: an info header pane (`hq chat-header`) above the
+real interactive harness CLI. A background watcher (`watchAttachPane`)
+polls for the CLI pane dying — the human exited or killed the window — and
+checks the session back in (`session.checkin`), resuming headless
+supervision on the same session id. Exactly one attached window at a time;
+attaching another closes (and checks in) the previous one first. Requires
+hq to be running inside tmux; outside tmux everything but attach works.
 
 ## Testing
 

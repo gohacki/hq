@@ -14,25 +14,34 @@ actions — not hide in channel scrollback. v2 rebuilds the UX around that.
 
 ## The org
 
-- **You: the boss.** Your surface is **My Office** — a decision queue.
-- **PM (one, global)** — lives in the **Conference Room**. Intake: creates
-  projects conversationally, routes asks, knows every project's state
-  (cross-project tools). Never writes code.
+- **You: the boss.** Your surface is the **kanban board** (home) plus a
+  **⚠ needs-you inbox** pinned at the top of the sidebar.
+- **Intake EM (one, global)** — the **◆ hq** home chat (no PM role).
+  Creates projects conversationally, routes asks, knows every project's
+  state (cross-project tools). Never writes code.
 - **EM (one per project)** — plans and delegates. For non-trivial asks it
   MUST propose a plan (doc + proposed tickets + open questions) that you
   review before work starts. On-demand with durable session memory; never
   writes code (prompt-enforced role; full tool access for reading context
   like your ticket tracker via your global MCP servers).
-- **Engineers (one per ticket)** — autonomous Claude Code sessions in
-  treehouse-leased worktrees. Ticket kinds: **build** (deliver a change
-  through the project's delivery mode) and **spike** (investigate → report
-  with proposed follow-up tickets).
+- **Engineers (one per ticket)** — autonomous Claude Code sessions. Every
+  ticket owns a native git worktree of EVERY project repo (same branch,
+  env files pre-copied per the playbook, decomposed together on landing —
+  branches stay in the user's repos). Ticket kinds: **build** (deliver a
+  change through the project's delivery mode) and **spike** (investigate →
+  report with proposed follow-up tickets).
+- **The playbook (per project)** — the captured SDLC: a prose lifecycle
+  doc plus a machine recipe (env globs, install/verify, dev servers +
+  ports, CI pipeline mirror), written during the EM's one-time setup
+  interview (which includes a no-mistakes gate walkthrough) and read with
+  `p`. Ticket intake grills the boss (one question at a time, recommended
+  answers, skippable) before planning.
 
-## My Office (home screen)
+## The inbox (⚠ needs you)
 
-Attention items, interrupts first, each a card with context and one-key
-actions (`enter` open · `a` approve · `o` thread · `v` desk visit ·
-`r` retry · `x` dismiss):
+Attention items, interrupts first, pinned at the top of the sidebar and
+mirrored as a banner inside the chat they belong to, with one-key actions
+(`enter` open · `a` approve · `r` retry · `d` dismiss · `1-9` options):
 
 | kind | tier | source |
 |---|---|---|
@@ -90,13 +99,20 @@ teardown.
 
 ## Views
 
-- **My Office** (default), **Board** (`b`: queued · building · delivering ·
-  needs-you · done, cards aging), **Conference Room / project chats**
-  (ticket threads render as **timelines** — agent chatter collapsed to
-  first lines, `x` expands), **plan review**, `?` help overlay.
-- **Desk visits** (`v`): tmux window, agent's live session left (same
-  model, EMs get their MCP tools), console in their worktree right;
-  closing hands control back to headless supervision.
+- **Board** (home): kanban — backlog · in progress · verify · needs-you ·
+  done, scoped to one project (sidebar enter) or all. Verify cards carry
+  the demo's dev-server URL. **Chats** (ticket/project), **plan review**,
+  `?` help overlay. Vim-native throughout (h/l/j/k, gg/G, `/` search,
+  `:` command line).
+- **Chat is the primary surface**: an hq-rendered thread — you, the EM, the
+  engineer — with system events interleaved as one-line "· event" markers
+  and a metadata header (status · model · worktree · dev URL · age).
+  Sessions stay headless; the composer is always live.
+- **Attach (`v`) is the escape hatch**: a picker lists the project's EM and
+  live engineers; picking one checks that session out of supervision and
+  opens the real interactive Claude Code CLI in a NEW tmux window (info
+  header on top). Closing the window / exiting the CLI checks it back in —
+  same session id, nothing lost. Requires hq to run inside tmux.
 
 ## Models
 
