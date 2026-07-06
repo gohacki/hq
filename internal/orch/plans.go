@@ -63,7 +63,7 @@ func (o *Orch) proposePlan(projectID, docMD string, tickets []ProposedTicket, qu
 	if err := os.WriteFile(docPath, []byte(docMD), 0o644); err != nil {
 		o.log.Error("write plan doc", "err", err)
 	}
-	o.systemMessage(p.ID, "", fmt.Sprintf("plan proposed (%d tickets) — review it in your office", len(tickets)))
+	o.systemMessage(p.ID, "", fmt.Sprintf("plan proposed (%d tickets) — review it in your inbox", len(tickets)))
 	if _, err := o.d.FileItem(store.Item{
 		Kind: store.ItemPlan, Tier: store.TierInterrupt, ProjectID: p.ID, RefID: plan.ID,
 		Title: fmt.Sprintf("plan review — %s (%d tickets)", p.Name, len(tickets)),
@@ -233,6 +233,53 @@ func (o *Orch) proposeHandbookEdit(projectID, summary, newBody string) (store.It
 	})
 }
 
+// approveItem is the single, correct "approve" action for any office item:
+// for a demo, tells the engineer to finish (and resolves the card); for a
+// handbook proposal, applies the edit. It exists so every caller — the
+// TUI's 'a' key, `hq call`, anything else — gets the right sequence by
+// construction, instead of composing "send this exact message, then
+// resolve the item" by hand and risking getting it wrong or forgetting a
+// step (which is exactly how the gap this closes was found).
+func (o *Orch) approveItem(ctx context.Context, itemID string) (string, error) {
+	it, err := o.d.Store.ItemByID(itemID)
+	if err != nil {
+		return "", err
+	}
+	switch it.Kind {
+	case store.ItemDemo:
+		body := "Verified — looks good. Proceed (finish delivery if pending, then STATUS: done)."
+		if _, err := o.d.PostMessage(store.Message{
+			ProjectID: it.ProjectID, TicketID: it.TicketID, Author: "boss", Body: body,
+		}); err != nil {
+			return "", err
+		}
+		if it.TicketID == "" {
+			p, err := o.d.Store.ProjectByID(it.ProjectID)
+			if err != nil {
+				return "", err
+			}
+			go o.BossProjectMessage(context.WithoutCancel(ctx), p, body)
+		} else {
+			t, err := o.d.Store.TicketByID(it.TicketID)
+			if err != nil {
+				return "", err
+			}
+			go o.BossTicketMessage(context.WithoutCancel(ctx), t, body)
+		}
+		if err := o.d.ResolveItem(it.ID); err != nil {
+			return "", err
+		}
+		return "demo approved", nil
+	case store.ItemHandbook:
+		if err := o.applyHandbookEdit(it.ID); err != nil {
+			return "", err
+		}
+		return "handbook updated", nil
+	default:
+		return "", fmt.Errorf("item %s (%s) isn't something 'approve' applies to — demos and handbook edits only", itemID, it.Kind)
+	}
+}
+
 // applyHandbookEdit is the office 'approve' action for a handbook item.
 func (o *Orch) applyHandbookEdit(itemID string) error {
 	it, err := o.d.Store.ItemByID(itemID)
@@ -341,6 +388,16 @@ func (o *Orch) registerPlanHandlers() {
 			return nil, err
 		}
 		return "applied", o.applyHandbookEdit(p.ItemID)
+	})
+
+	srv.Handle("item.approve", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return o.approveItem(context.WithoutCancel(ctx), p.ID)
 	})
 
 	srv.Handle("ticket.handoff", func(ctx context.Context, raw json.RawMessage) (any, error) {

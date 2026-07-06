@@ -54,8 +54,8 @@ type Session interface {
 // Harness starts agent sessions.
 type Harness interface {
 	Start(ctx context.Context, spec Spec) (Session, error)
-	// InteractiveCommand returns argv to resume a session interactively in a
-	// terminal (the tmux escape hatch), on the given model ("" = default),
-	// with any extra harness args (e.g. an MCP config).
+	// InteractiveCommand returns argv to resume a session interactively —
+	// the TUI spawns this under its own embedded pty — on the given model
+	// ("" = default), with any extra harness args (e.g. an MCP config).
 	InteractiveCommand(sessionID, model string, extraArgs ...string) []string
 }

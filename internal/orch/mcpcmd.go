@@ -64,7 +64,7 @@ func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
 	tools := []mcp.Tool{
 		{
 			Name:        "propose_plan",
-			Description: "Propose a plan for a non-trivial ask: a short plan doc, the proposed tickets, and open questions. It lands in the boss's office for review — accepted tickets spawn automatically and you receive the boss's decisions/answers as a message. Use this INSTEAD of create_ticket for anything with scope decisions.",
+			Description: "Propose a plan for a non-trivial ask: a short plan doc, the proposed tickets, and open questions. It lands in the boss's inbox for review — accepted tickets spawn automatically and you receive the boss's decisions/answers as a message. Use this INSTEAD of create_ticket for anything with scope decisions.",
 			InputSchema: obj(map[string]any{
 				"doc_md":    str("plan document (markdown): goal, approach, risks — concise"),
 				"tickets":   map[string]any{"type": "array", "items": ticketSchema, "description": "proposed tickets in execution order"},
@@ -142,6 +142,43 @@ func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
 			},
 		},
 		{
+			Name:        "get_playbook",
+			Description: "Read this project's playbook: the agreed SDLC prose doc plus the per-repo machine recipe (env_globs, install, verify, dev, port_note, pipeline). Empty = the setup interview hasn't happened yet.",
+			InputSchema: obj(map[string]any{}),
+			Run: func(json.RawMessage) (string, error) {
+				return call("playbook.get", map[string]any{"project_id": projectID})
+			},
+		},
+		{
+			Name:        "set_playbook",
+			Description: "Write the project playbook after (or while refining) the setup interview. prose = the lifecycle doc (markdown: intake → grill → plan → build → pipeline → verify → deliver → merge → deploy, as agreed with the boss). repos = per-repo recipe the daemon executes deterministically. Omitted halves are kept; repos merge by name.",
+			InputSchema: obj(map[string]any{
+				"prose": str("playbook.md content (markdown lifecycle doc)"),
+				"repos": map[string]any{"type": "object", "description": "repo name → recipe", "additionalProperties": obj(map[string]any{
+					"env_globs": map[string]any{"type": "array", "items": str("glob relative to repo root, e.g. .env or .env.*"), "description": "untracked files copied into every fresh worktree"},
+					"install":   str("dependency install command, e.g. npm ci"),
+					"verify":    str("command proving the workspace works, e.g. npx tsc --noEmit"),
+					"dev":       str("dev server command"),
+					"port_note": str("how to pick a unique port per worktree (env var / flag)"),
+					"pipeline":  str("local mirror of the CI pipeline (must pass before demo/delivery)"),
+				})},
+			}),
+			Run: func(a json.RawMessage) (string, error) {
+				var p struct {
+					Prose string          `json:"prose"`
+					Repos json.RawMessage `json:"repos"`
+				}
+				if err := json.Unmarshal(a, &p); err != nil {
+					return "", err
+				}
+				params := map[string]any{"project_id": projectID, "prose": p.Prose}
+				if len(p.Repos) > 0 {
+					params["repos"] = p.Repos
+				}
+				return call("playbook.set", params)
+			},
+		},
+		{
 			Name:        "list_tickets",
 			Description: "List this project's tickets with live status (queued|running|needs-input|blocked|delivering|visiting|done|failed|abandoned).",
 			InputSchema: obj(map[string]any{}),
@@ -191,7 +228,7 @@ func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
 		},
 		{
 			Name:        "propose_handbook_edit",
-			Description: "Propose a new full handbook body when the boss states durable conventions. Lands in the boss's office for one-key approval — never silently rewrite the handbook.",
+			Description: "Propose a new full handbook body when the boss states durable conventions. Lands in the boss's inbox for one-key approval — never silently rewrite the handbook.",
 			InputSchema: obj(map[string]any{
 				"summary":  str("one-line summary of what changed"),
 				"new_body": str("the FULL new handbook markdown body"),
@@ -246,6 +283,26 @@ func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
 				}
 				return call("model.set", map[string]any{
 					"project_id": projectID, "ticket_id": p.TicketID, "scope": scope, "model": p.Model,
+				})
+			},
+		},
+		{
+			Name:        "set_project_settings",
+			Description: "Change this project's delivery mode (no-mistakes | direct-pr | local-only) and/or verify mode (none | before-delivery | on-completion) when the boss asks. Omit whichever one you're not changing. Takes effect on the next ticket created — tickets already in flight keep the settings they were briefed with.",
+			InputSchema: obj(map[string]any{
+				"delivery": map[string]any{"type": "string", "enum": []string{"no-mistakes", "direct-pr", "local-only"}},
+				"verify":   map[string]any{"type": "string", "enum": []string{"none", "before-delivery", "on-completion"}},
+			}),
+			Run: func(a json.RawMessage) (string, error) {
+				var p struct {
+					Delivery string `json:"delivery"`
+					Verify   string `json:"verify"`
+				}
+				if err := json.Unmarshal(a, &p); err != nil {
+					return "", err
+				}
+				return call("project.settings.set", map[string]any{
+					"project_id": projectID, "delivery": p.Delivery, "verify": p.Verify,
 				})
 			},
 		},

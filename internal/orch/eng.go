@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/gohacki/hq/internal/agent"
+	"github.com/gohacki/hq/internal/playbook"
 	"github.com/gohacki/hq/internal/store"
 	"github.com/gohacki/hq/internal/worktree"
 )
@@ -89,7 +90,14 @@ func (o *Orch) createTicket(ctx context.Context, projectID, repoName, kind, titl
 		return store.Ticket{}, err
 	}
 
-	fullBrief := engBrief(p, t, repo, brief)
+	// The whole worktree set's paths are deterministic, so the brief can
+	// name every sibling before anything is created (spawnEng creates them).
+	pb, err := playbook.Load(o.d.Paths.ProjectDir(p.Name))
+	if err != nil {
+		o.log.Error("playbook load", "project", p.Name, "err", err)
+	}
+	trees := plannedTrees(o.d.Paths.WorktreesDir(), t.ID, repo, repos)
+	fullBrief := engBrief(p, t, repo, brief, pb, trees)
 	if err := os.WriteFile(t.BriefPath, []byte(fullBrief), 0o644); err != nil {
 		return store.Ticket{}, err
 	}
@@ -101,8 +109,37 @@ func (o *Orch) createTicket(ctx context.Context, projectID, repoName, kind, titl
 		o.log.Error("post ticket-opened message", "err", err)
 	}
 
-	go o.spawnEng(ctx, p, t, repo, fullBrief)
+	go o.spawnEng(ctx, p, t, repo, repos, pb, fullBrief)
 	return t, nil
+}
+
+// orderedRepos is a ticket's repo order: primary first, then the rest of
+// the project — every repo gets a worktree, used or not, decomposed
+// together when the ticket lands.
+func orderedRepos(primary store.Repo, repos []store.Repo) []store.Repo {
+	ordered := []store.Repo{primary}
+	for _, r := range repos {
+		if r.ID != primary.ID {
+			ordered = append(ordered, r)
+		}
+	}
+	return ordered
+}
+
+// plannedTrees computes a ticket's worktree set. Paths are pure functions
+// of (root, ticket, repo), so brief-writing and creation agree without
+// coordination.
+func plannedTrees(root, ticketID string, primary store.Repo, repos []store.Repo) []worktree.Tree {
+	var out []worktree.Tree
+	for _, r := range orderedRepos(primary, repos) {
+		out = append(out, worktree.Tree{
+			RepoName: r.Name,
+			RepoPath: r.Path,
+			Path:     filepath.Join(root, ticketID, r.Name),
+			Branch:   worktree.BranchName(ticketID),
+		})
+	}
+	return out
 }
 
 // retryTicket re-opens a failed ticket as a fresh one with the same brief.
@@ -139,21 +176,81 @@ func (o *Orch) retryTicket(ctx context.Context, ticketID string) (store.Ticket, 
 	return o.createTicket(ctx, old.ProjectID, repoName, old.Kind, old.Title, string(brief), old.Model)
 }
 
-func (o *Orch) spawnEng(ctx context.Context, p store.Project, t store.Ticket, repo store.Repo, prompt string) {
-	wt, err := worktree.Lease(repo.Path, "hq:"+t.ID)
+// abandonTicket gives up on a failed/blocked ticket for good: unlike retry
+// (which opens a fresh one), this just marks it done-with — it stops
+// showing up in the board's "needs you" column, which failed/blocked
+// tickets otherwise do forever (no age cutoff, unlike done). Fail-closed on
+// a worktree with unlanded work, same as project delete and normal
+// teardown, unless force.
+func (o *Orch) abandonTicket(ticketID string, force bool) (store.Ticket, error) {
+	t, err := o.d.Store.TicketByID(ticketID)
 	if err != nil {
-		o.failTicket(t, "worktree lease failed: "+err.Error())
-		return
+		return store.Ticket{}, err
 	}
-	t.WorktreePath = wt
+	// Terminal() includes failed — exactly the common case for abandon — so
+	// checking that directly would reject the whole point of this. Only
+	// done/already-abandoned genuinely have nothing left to give up on.
+	if t.Status == store.TicketDone || t.Status == store.TicketAbandoned {
+		return store.Ticket{}, fmt.Errorf("ticket %s is already %s", t.ID, t.Status)
+	}
+	o.dropEng(t.ID)
+	if !force {
+		if trees, _ := o.d.Store.WorktreesForTicket(t.ID); len(trees) > 0 {
+			for _, w := range trees {
+				if reason := unlandedWork(w.Path); reason != "" {
+					return store.Ticket{}, fmt.Errorf("worktree %s has unlanded work (%s) — pass force to abandon anyway and discard it", w.Path, reason)
+				}
+			}
+		}
+	}
+	o.removeTicketTrees(t.ID, force)
+	t.WorktreePath = ""
+	t.Status = store.TicketAbandoned
+	if err := o.d.UpdateTicket(t); err != nil {
+		return store.Ticket{}, err
+	}
+	o.systemMessage(t.ProjectID, t.ID, "abandoned by the boss")
+	return t, nil
+}
+
+// spawnEng stands up the ticket's whole worktree set (a tree per project
+// repo, env files copied deterministically per the playbook), then starts
+// the engineer in the primary repo's tree.
+func (o *Orch) spawnEng(ctx context.Context, p store.Project, t store.Ticket, repo store.Repo, repos []store.Repo, pb playbook.Playbook, prompt string) {
+	var made []worktree.Tree
+	for _, r := range orderedRepos(repo, repos) {
+		globs := pb.Recipe(r.Name).EnvGlobsOrDefault()
+		tree, err := worktree.Create(o.d.Paths.WorktreesDir(), t.ID, r.Path, r.DefaultBranch, globs)
+		if err != nil {
+			for _, m := range made { // don't leave a half-built set behind
+				worktree.Remove(m.RepoPath, m.Path)
+			}
+			o.failTicket(t, "worktree setup failed ("+r.Name+"): "+err.Error())
+			return
+		}
+		made = append(made, tree)
+		if err := o.d.Store.AddWorktree(store.Worktree{
+			TicketID: t.ID, RepoID: r.ID, RepoPath: tree.RepoPath,
+			Path: tree.Path, Branch: tree.Branch,
+		}); err != nil {
+			o.log.Error("record worktree", "err", err)
+		}
+	}
+	t.WorktreePath = made[0].Path // primary — the engineer's cwd
+	t.Branch = made[0].Branch
 	t.Status = store.TicketRunning
 	if err := o.d.UpdateTicket(t); err != nil {
 		o.log.Error("update ticket", "err", err)
 	}
+	names := make([]string, len(made))
+	for i, m := range made {
+		names[i] = m.RepoName
+	}
+	o.systemMessage(t.ProjectID, t.ID, fmt.Sprintf("engineer started · branch %s · worktrees: %s", made[0].Branch, strings.Join(names, ", ")))
 
 	sess, err := o.harness.Start(ctx, agent.Spec{
 		Model:      o.engModel(t),
-		WorkDir:    wt,
+		WorkDir:    made[0].Path,
 		Prompt:     prompt,
 		Autonomous: true, // isolated worktree
 	})
@@ -309,6 +406,7 @@ func (o *Orch) classifyTurnEnd(t *store.Ticket, ev agent.Event, post func(kind, 
 	}
 	switch {
 	case t.Status == store.TicketNeedsInput && isDemo:
+		o.systemMessage(t.ProjectID, t.ID, "demo posted — parked for your verification")
 		o.fileTicketItem(*t, store.ItemDemo, store.TierBreak, "demo ready", text)
 	case t.Status == store.TicketNeedsInput && reQuestion.MatchString(text):
 		o.fileTicketItem(*t, store.ItemQuestion, store.TierInterrupt, "question", reQuestion.FindStringSubmatch(text)[1])
@@ -319,6 +417,7 @@ func (o *Orch) classifyTurnEnd(t *store.Ticket, ev agent.Event, post func(kind, 
 	case t.Status == store.TicketFailed:
 		o.fileTicketItem(*t, store.ItemFailed, store.TierInterrupt, "failed", text)
 	case t.Status == store.TicketDone:
+		o.systemMessage(t.ProjectID, t.ID, "ticket done")
 		o.dropEng(t.ID)
 		go o.teardown(*t)
 	}
@@ -340,8 +439,37 @@ func (o *Orch) failTicket(t store.Ticket, msg string) {
 	if err := o.d.UpdateTicket(t); err != nil {
 		o.log.Error("update ticket", "err", err)
 	}
+	title := "failed"
+	if looksLikeNetworkFailure(msg) {
+		title = "offline? check VPN/connection, then r to retry"
+		msg = "This looks like a connectivity problem (can't reach a host), not something wrong " +
+			"with the ticket itself — nothing is lost. Reconnect, then press r to retry.\n\n" + msg
+	}
 	o.systemMessage(t.ProjectID, t.ID, msg)
-	o.fileTicketItem(t, store.ItemFailed, store.TierInterrupt, "failed", msg)
+	o.fileTicketItem(t, store.ItemFailed, store.TierInterrupt, title, msg)
+}
+
+// looksLikeNetworkFailure flags error text matching common
+// connectivity-failure signatures (git/curl/DNS wording) — these are
+// almost always "you're offline or off-VPN," not a real problem with the
+// ticket, so the fix is reconnect-and-retry, not investigation.
+func looksLikeNetworkFailure(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, sig := range []string{
+		"could not resolve host",
+		"could not resolve proxy",
+		"connection timed out",
+		"network is unreachable",
+		"connection refused",
+		"could not connect to",
+		"no route to host",
+		"temporary failure in name resolution",
+	} {
+		if strings.Contains(lower, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProposedTickets extracts the "## Proposed tickets" bullets from a spike

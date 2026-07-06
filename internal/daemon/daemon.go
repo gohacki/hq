@@ -209,8 +209,8 @@ func (d *Daemon) CreateProject(name string, repoPaths []string, delivery, verify
 	return p, nil
 }
 
-// addRepo registers a local repo with a project and makes sure it has a
-// treehouse pool config so engineer worktrees can be leased from it.
+// addRepo registers a local repo with a project. Nothing is written into
+// the repo itself — worktrees are native git worktrees under hq's data dir.
 func (d *Daemon) addRepo(p store.Project, path string) (store.Repo, error) {
 	abs, err := filepath.Abs(expandHome(path))
 	if err != nil {
@@ -226,9 +226,6 @@ func (d *Daemon) addRepo(p store.Project, path string) (store.Repo, error) {
 		Name:          filepath.Base(abs),
 		Path:          abs,
 		DefaultBranch: branch,
-	}
-	if err := ensureTreehouseConfig(abs); err != nil {
-		return store.Repo{}, err
 	}
 	if err := d.Store.AddRepo(r); err != nil {
 		return store.Repo{}, err
@@ -257,14 +254,6 @@ func gitDefaultBranch(repo string) string {
 	return "main"
 }
 
-func ensureTreehouseConfig(repo string) error {
-	p := filepath.Join(repo, "treehouse.toml")
-	if _, err := os.Stat(p); err == nil {
-		return nil
-	}
-	// Minimal pool config; worktrees land under $HOME/.treehouse by default.
-	return os.WriteFile(p, []byte("max_trees = 16\nroot = \"\"\n"), 0o644)
-}
 
 // --- RPC handlers ---
 

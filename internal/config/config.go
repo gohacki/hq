@@ -56,3 +56,6 @@ func (p Paths) ProjectDir(name string) string {
 func (p Paths) TicketDir(project, ticketID string) string {
 	return filepath.Join(p.ProjectDir(project), "tickets", ticketID)
 }
+
+// WorktreesDir holds every ticket's worktree set: worktrees/<ticket>/<repo>.
+func (p Paths) WorktreesDir() string { return filepath.Join(p.DataDir, "worktrees") }
