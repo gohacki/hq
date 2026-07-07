@@ -1,4 +1,4 @@
-// Package orch is hq's orchestration layer: it runs the PM, EMs, and
+// Package orch is hq's orchestration layer: it runs the director, EMs, and
 // engineers on top of the daemon core. The daemon stays deterministic; orch
 // owns everything that touches an agent process.
 package orch
@@ -16,21 +16,24 @@ import (
 
 	"github.com/gohacki/hq/internal/agent"
 	"github.com/gohacki/hq/internal/daemon"
+	"github.com/gohacki/hq/internal/playbook"
 	"github.com/gohacki/hq/internal/store"
 )
 
-// emIdleTimeout closes an idle EM/PM process; its session resumes on the
+// emIdleTimeout closes an idle EM/director process; its session resumes on the
 // next message, so this only trades warm-start latency for memory.
 const emIdleTimeout = 15 * time.Minute
 
 type Orch struct {
-	d       *daemon.Daemon
-	harness agent.Harness
-	log     *slog.Logger
+	d         *daemon.Daemon
+	harness   agent.Harness // engineers (Claude Code)
+	emHarness agent.Harness // director + EMs (pi when available)
+	log       *slog.Logger
 
-	mu   sync.Mutex
-	ems  map[string]*em     // project id → live EM/PM process
-	engs map[string]*engRun // ticket id → live engineer process
+	mu        sync.Mutex
+	ems       map[string]*em                // project id → live EM/director process
+	engs      map[string]*engRun            // ticket id → live engineer process
+	visitPrev map[string]store.TicketStatus // ticket id → status to restore on checkin
 }
 
 type em struct {
@@ -38,8 +41,11 @@ type em struct {
 	lastUse time.Time
 }
 
-func New(d *daemon.Daemon, h agent.Harness, log *slog.Logger) *Orch {
-	o := &Orch{d: d, harness: h, log: log, ems: map[string]*em{}, engs: map[string]*engRun{}}
+// New builds the orchestration layer. eng runs engineers (Claude Code); em
+// runs the director and project EMs (the open-source manager harness; pass
+// the same harness for both to keep everything on one).
+func New(d *daemon.Daemon, eng, mgr agent.Harness, log *slog.Logger) *Orch {
+	o := &Orch{d: d, harness: eng, emHarness: mgr, log: log, ems: map[string]*em{}, engs: map[string]*engRun{}, visitPrev: map[string]store.TicketStatus{}}
 	o.registerHandlers()
 	go o.reapIdleEMs()
 	return o
@@ -61,22 +67,77 @@ func (o *Orch) BossTicketMessage(ctx context.Context, t store.Ticket, body strin
 	}
 }
 
-// Reconcile runs at daemon boot: live agent processes did not survive the
-// restart, so park every previously-active ticket until the boss nudges it.
+// restartResumePrompt nudges a resumed engineer back into motion after a
+// daemon restart cut its previous process mid-run.
+const restartResumePrompt = `hq restarted while you were mid-run; your session was resumed. Take
+stock first — git status/log in your worktree and your own last messages —
+then continue the ticket from where you left off. End your turn with the
+usual DEMO:/STATUS:/QUESTION: marker.`
+
+// Reconcile runs at daemon boot. Engineer processes never survive a
+// restart, but their sessions do: tickets that were running or delivering
+// with a persisted session id are resumed in place (same worktree, same
+// session, a take-stock nudge). Anything that can't be resumed is parked
+// as needs-input. Tickets already sitting in needs-input/blocked (a demo,
+// question, or failure already correctly waiting on the boss — nothing was
+// lost) are left alone; parking them anyway would post a misleading
+// "parked by restart" message and a duplicate item next to whatever
+// legitimately got them there.
+//
+// Visiting tickets are always parked even though a live tmux chat pane
+// *might* still be running independent of the daemon: the daemon's own
+// in-memory ownership of that session (checkoutEngineer's bookkeeping) is
+// gone regardless of the pane's fate, and it has no way to tell "pane
+// still open" from "whole hq session died with it, ticket orphaned in
+// visiting forever" — needs-input is the safe default either way. If the
+// pane really is still open, its eventual close just finds the status
+// already moved on and no-ops (checkinEngineer only acts on TicketVisiting).
 func (o *Orch) Reconcile(ctx context.Context, tickets []store.Ticket) {
 	go o.sweepTeardowns()
 	for _, t := range tickets {
-		if t.Status == store.TicketQueued {
-			continue
+		switch t.Status {
+		case store.TicketRunning, store.TicketDelivering:
+			if t.SessionID != "" && t.WorktreePath != "" {
+				if err := o.sendToEng(ctx, t, restartResumePrompt); err == nil {
+					o.systemMessage(t.ProjectID, t.ID, "hq restarted — engineer session resumed where it left off")
+					continue
+				} else {
+					o.log.Error("resume after restart failed", "ticket", t.ID, "err", err)
+				}
+			}
+			o.parkTicket(t)
+		case store.TicketVisiting:
+			o.parkTicket(t)
 		}
-		t.Status = store.TicketNeedsInput
-		if err := o.d.UpdateTicket(t); err != nil {
-			o.log.Error("reconcile update failed", "ticket", t.ID, "err", err)
-			continue
-		}
-		o.systemMessage(t.ProjectID, t.ID,
-			"hq restarted — engineer session parked. Reply in this thread to resume it.")
-		o.fileTicketItem(t, store.ItemBlocked, store.TierInterrupt, "parked by restart — reply to resume", "")
+	}
+}
+
+// parkTicket moves a ticket the restart orphaned into needs-input and
+// files an interrupt so the boss knows to reply-to-resume.
+func (o *Orch) parkTicket(t store.Ticket) {
+	t.Status = store.TicketNeedsInput
+	if err := o.d.UpdateTicket(t); err != nil {
+		o.log.Error("reconcile update failed", "ticket", t.ID, "err", err)
+		return
+	}
+	o.systemMessage(t.ProjectID, t.ID,
+		"hq restarted — engineer session parked. Reply in this thread to resume it.")
+	o.fileTicketItem(t, store.ItemBlocked, store.TierInterrupt, "parked by restart — reply to resume", "")
+}
+
+// Shutdown closes every live agent session so a daemon restart leaves
+// clean session files behind; the sessions themselves resume on the next
+// boot (engineers via Reconcile, EMs lazily on the next message).
+func (o *Orch) Shutdown() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for id, l := range o.ems {
+		l.session.Close()
+		delete(o.ems, id)
+	}
+	for id, c := range o.engs {
+		c.session.Close()
+		delete(o.engs, id)
 	}
 }
 
@@ -99,11 +160,11 @@ func (o *Orch) fileTicketItem(t store.Ticket, kind store.ItemKind, tier store.It
 	}
 }
 
-// --- EM / PM lifecycle (same machinery; the PM is the conference room's EM
-// with a different prompt and tool set) ---
+// --- EM / director lifecycle (same machinery; the director is the home
+// room's EM with a different prompt and tool set) ---
 
-func (o *Orch) isConferenceRoom(p store.Project) bool {
-	return p.Name == daemon.ConferenceRoomName
+func (o *Orch) isDirectorRoom(p store.Project) bool {
+	return p.Name == store.DirectorRoomName
 }
 
 func (o *Orch) sendToEM(ctx context.Context, p store.Project, body string) error {
@@ -132,13 +193,9 @@ func (o *Orch) dropEM(projectID string) {
 }
 
 func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) error {
-	mcpPath, err := o.writeEMMCPConfig(p)
-	if err != nil {
-		return err
-	}
 	sysPrompt := emSystemPrompt(p)
-	if o.isConferenceRoom(p) {
-		sysPrompt = pmSystemPrompt()
+	if o.isDirectorRoom(p) {
+		sysPrompt = directorSystemPrompt()
 	}
 	spec := agent.Spec{
 		Model:           p.EMModel,
@@ -146,14 +203,24 @@ func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) erro
 		SystemPrompt:    sysPrompt,
 		Prompt:          prompt,
 		ResumeSessionID: p.EMSessionID,
-		MCPConfigPath:   mcpPath,
 		Autonomous:      true, // full tool access; delegate-don't-do is prompt-enforced
 	}
-	sess, err := o.harness.Start(ctx, spec)
+	if o.emHarness.SupportsMCP() {
+		mcpPath, err := o.writeEMMCPConfig(p)
+		if err != nil {
+			return err
+		}
+		spec.MCPConfigPath = mcpPath
+	} else {
+		// No MCP (pi): the same tool set is reachable as the `hq em` CLI —
+		// teach the role prompt how to call it.
+		spec.SystemPrompt += cliToolsSection(p.ID, o.isDirectorRoom(p))
+	}
+	sess, err := o.emHarness.Start(ctx, spec)
 	if err != nil && p.EMSessionID != "" {
-		// Stale session id (e.g. claude storage cleaned) — start fresh.
+		// Stale session id (e.g. harness storage cleaned) — start fresh.
 		spec.ResumeSessionID = ""
-		sess, err = o.harness.Start(ctx, spec)
+		sess, err = o.emHarness.Start(ctx, spec)
 	}
 	if err != nil {
 		return err
@@ -166,10 +233,9 @@ func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) erro
 }
 
 func (o *Orch) pumpEM(p store.Project, sess agent.Session) {
+	// The director (home chat) and project EMs share the author tag —
+	// routing keys on "em"; the TUI relabels it "director" in the home chat.
 	author := "em"
-	if o.isConferenceRoom(p) {
-		author = "pm"
-	}
 	for ev := range sess.Events() {
 		switch ev.Kind {
 		case agent.EvInit:
@@ -219,8 +285,8 @@ func (o *Orch) writeEMMCPConfig(p store.Project) (string, error) {
 		return "", err
 	}
 	args := []string{"mcp-em", "--project", p.ID}
-	if o.isConferenceRoom(p) {
-		args = append(args, "--pm")
+	if o.isDirectorRoom(p) {
+		args = append(args, "--director")
 	}
 	cfg := map[string]any{
 		"mcpServers": map[string]any{
@@ -281,6 +347,7 @@ func (o *Orch) registerHandlers() {
 		for _, r := range repos {
 			o.seedOnboarding(bg, prj, r)
 		}
+		o.systemMessage(prj.ID, "", "setup interview pending — say hello and the EM will walk you through this project's lifecycle (worktrees, dev servers, pipeline, delivery) into its playbook")
 		return prj, nil
 	})
 
@@ -376,6 +443,17 @@ func (o *Orch) registerHandlers() {
 		return o.retryTicket(context.WithoutCancel(ctx), p.TicketID)
 	})
 
+	srv.Handle("ticket.abandon", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			TicketID string `json:"ticket_id"`
+			Force    bool   `json:"force"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		return o.abandonTicket(p.TicketID, p.Force)
+	})
+
 	srv.Handle("report.read", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
 			TicketID string `json:"ticket_id"`
@@ -423,26 +501,36 @@ func (o *Orch) registerHandlers() {
 		return o.refreshOnboarding(context.WithoutCancel(ctx), p.ProjectID, p.Repo)
 	})
 
-	srv.Handle("ticket.visit", func(ctx context.Context, raw json.RawMessage) (any, error) {
+	// session.checkout/checkin hand a live session over to the human's
+	// terminal for interactive use and back. The daemon never owns a
+	// terminal — it just returns the argv+dir the TUI needs to spawn the
+	// real interactive harness CLI itself, embedded in its own frame.
+	srv.Handle("session.checkout", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
-			TicketID    string `json:"ticket_id"`
-			TmuxSession string `json:"tmux_session"`
+			ProjectID string `json:"project_id"`
+			TicketID  string `json:"ticket_id"`
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		return o.visitEngineer(p.TicketID, p.TmuxSession)
+		if p.TicketID != "" {
+			return o.checkoutEngineer(p.TicketID)
+		}
+		return o.checkoutEM(p.ProjectID)
 	})
 
-	srv.Handle("em.visit", func(ctx context.Context, raw json.RawMessage) (any, error) {
+	srv.Handle("session.checkin", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
-			ProjectID   string `json:"project_id"`
-			TmuxSession string `json:"tmux_session"`
+			ProjectID string `json:"project_id"`
+			TicketID  string `json:"ticket_id"`
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, err
 		}
-		return o.visitEM(p.ProjectID, p.TmuxSession)
+		if p.TicketID != "" {
+			return "checked in", o.checkinEngineer(p.TicketID)
+		}
+		return "checked in", o.checkinEM(p.ProjectID)
 	})
 
 	srv.Handle("model.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
@@ -461,7 +549,99 @@ func (o *Orch) registerHandlers() {
 		return o.setModel(context.WithoutCancel(ctx), p.ProjectID, p.TicketID, p.Scope, p.Model)
 	})
 
+	srv.Handle("project.settings.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ProjectID string `json:"project_id"`
+			Delivery  string `json:"delivery"` // "" = leave unchanged
+			Verify    string `json:"verify"`   // "" = leave unchanged
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		if p.Delivery != "" {
+			switch p.Delivery {
+			case "no-mistakes", "direct-pr", "local-only":
+			default:
+				return nil, fmt.Errorf("unknown delivery mode %q (no-mistakes | direct-pr | local-only)", p.Delivery)
+			}
+			if err := o.d.Store.SetProjectDelivery(p.ProjectID, p.Delivery); err != nil {
+				return nil, err
+			}
+		}
+		if p.Verify != "" {
+			switch p.Verify {
+			case "none", "before-delivery", "on-completion":
+			default:
+				return nil, fmt.Errorf("unknown verify mode %q (none | before-delivery | on-completion)", p.Verify)
+			}
+			if err := o.d.Store.SetProjectVerify(p.ProjectID, p.Verify); err != nil {
+				return nil, err
+			}
+		}
+		prj, err := o.d.Store.ProjectByID(p.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		o.systemMessage(p.ProjectID, "", fmt.Sprintf("project settings updated — delivery: %s, verify: %s", prj.Delivery, prj.Verify))
+		return fmt.Sprintf("%s → delivery: %s, verify: %s", prj.Name, prj.Delivery, prj.Verify), nil
+	})
+
+	srv.Handle("playbook.get", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ProjectID string `json:"project_id"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		prj, err := o.d.Store.ProjectByID(p.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		pb, err := playbook.Load(o.d.Paths.ProjectDir(prj.Name))
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"exists": playbook.Exists(o.d.Paths.ProjectDir(prj.Name)),
+			"prose":  pb.Prose,
+			"repos":  pb.Repos,
+		}, nil
+	})
+
+	srv.Handle("playbook.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
+		var p struct {
+			ProjectID string                          `json:"project_id"`
+			Prose     string                          `json:"prose"`
+			Repos     map[string]playbook.RepoRecipe `json:"repos"`
+		}
+		if err := json.Unmarshal(raw, &p); err != nil {
+			return nil, err
+		}
+		prj, err := o.d.Store.ProjectByID(p.ProjectID)
+		if err != nil {
+			return nil, err
+		}
+		// Merge semantics: omitted halves keep their current value, so the
+		// EM can refine prose and recipes independently.
+		cur, err := playbook.Load(o.d.Paths.ProjectDir(prj.Name))
+		if err != nil {
+			return nil, err
+		}
+		if p.Prose != "" {
+			cur.Prose = p.Prose
+		}
+		for name, r := range p.Repos {
+			cur.Repos[name] = r
+		}
+		if err := playbook.Save(o.d.Paths.ProjectDir(prj.Name), cur); err != nil {
+			return nil, err
+		}
+		o.systemMessage(prj.ID, "", "playbook updated — press p on the project to read it")
+		return "saved", nil
+	})
+
 	o.registerPlanHandlers()
+	o.registerDeleteHandler()
 }
 
 // setModel changes an agent's model on the fly. Live sessions are dropped

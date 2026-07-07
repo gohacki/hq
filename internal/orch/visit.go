@@ -3,81 +3,23 @@ package orch
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
-	"time"
 
 	"github.com/gohacki/hq/internal/store"
 )
 
-// Desk visits: sit down at an agent's desk — a tmux window with their Claude
-// session resumed interactively on the left and a console shell on the right.
+// Session checkout/checkin: hand a live agent session over to the human for
+// interactive use, and back. The daemon never owns a terminal itself — it
+// just drops the headless process (so exactly one process owns the session)
+// and hands the TUI everything it needs to spawn the real interactive CLI
+// in its own embedded terminal. Checking back in restores headless
+// supervision on the same session id.
 
-func tmuxAvailable() error {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		return fmt.Errorf("tmux not installed")
-	}
-	if os.Getenv("TMUX") == "" {
-		// The daemon rarely runs inside tmux; target the client's session via
-		// the default server instead. Requires any tmux server to be up.
-		if err := exec.Command("tmux", "has-session").Run(); err != nil {
-			return fmt.Errorf("no tmux server running — start hq inside tmux to use desk visits")
-		}
-	}
-	return nil
-}
-
-// openVisitWindow creates the two-pane visit window. tmuxSession targets the
-// caller's tmux session (the daemon usually runs outside tmux, where an
-// untargeted new-window lands in an arbitrary session).
-func (o *Orch) openVisitWindow(tmuxSession, winName, dir, sessionID, model string, extraArgs ...string) error {
-	resume := o.harness.InteractiveCommand(sessionID, model, extraArgs...)
-	target := winName
-	args := []string{"new-window", "-n", winName, "-c", dir}
-	if tmuxSession != "" {
-		args = append(args, "-t", tmuxSession+":")
-		target = tmuxSession + ":" + winName
-	}
-	args = append(args, shellJoin(resume))
-	if out, err := exec.Command("tmux", args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("tmux new-window: %w %s", err, strings.TrimSpace(string(out)))
-	}
-	if out, err := exec.Command("tmux", "split-window", "-h", "-t", target, "-c", dir).CombinedOutput(); err != nil {
-		o.log.Error("visit split failed", "err", err, "out", string(out))
-	}
-	exec.Command("tmux", "select-pane", "-t", target+".0").Run()
-	return nil
-}
-
-// visitEM opens the project's EM (or the PM) interactively: its session
-// resumed in Claude Code on the left, a console in the project's data dir on
-// the right. The headless process (if warm) is dropped first so one process
-// owns the session; the next project message resumes it headlessly as usual.
-func (o *Orch) visitEM(projectID, tmuxSession string) (string, error) {
-	if err := tmuxAvailable(); err != nil {
-		return "", err
-	}
-	p, err := o.d.Store.ProjectByID(projectID)
-	if err != nil {
-		return "", err
-	}
-	if p.EMSessionID == "" {
-		return "", fmt.Errorf("%s has no manager session yet — message the project first", p.Name)
-	}
-	o.dropEM(p.ID)
-	winName := "hq-em-" + p.Name
-	dir := o.d.Paths.ProjectDir(p.Name)
-	// Same MCP tools as the headless EM, so the interactive session can
-	// delegate tickets too.
-	extra := []string{}
-	if mcp := filepath.Join(dir, "mcp.json"); fileExists(mcp) {
-		extra = append(extra, "--mcp-config", mcp)
-	}
-	if err := o.openVisitWindow(tmuxSession, winName, dir, p.EMSessionID, p.EMModel, extra...); err != nil {
-		return "", err
-	}
-	return winName, nil
+// Checkout is what the TUI needs to spawn the real interactive harness CLI
+// itself, resumed on the session being handed over.
+type Checkout struct {
+	Argv []string `json:"argv"`
+	Dir  string   `json:"dir"`
 }
 
 func fileExists(p string) bool {
@@ -85,79 +27,96 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// visitEngineer opens a ticket's engineer interactively in its worktree. The
-// headless process is closed first so exactly one process owns the session;
-// supervision resumes when the window closes.
-func (o *Orch) visitEngineer(ticketID, tmuxSession string) (string, error) {
-	if err := tmuxAvailable(); err != nil {
-		return "", err
-	}
-	t, err := o.d.Store.TicketByID(ticketID)
+// checkoutEM hands the project's EM (or director) session over for interactive use.
+// The headless process (if warm) is dropped first; the next project message
+// resumes it headlessly as usual once the human checks back in.
+func (o *Orch) checkoutEM(projectID string) (Checkout, error) {
+	p, err := o.d.Store.ProjectByID(projectID)
 	if err != nil {
-		return "", err
+		return Checkout{}, err
 	}
-	if t.SessionID == "" || t.WorktreePath == "" {
-		return "", fmt.Errorf("ticket has no live session/worktree to visit")
+	if p.EMSessionID == "" {
+		return Checkout{}, fmt.Errorf("%s has no manager session yet — message the project first", p.Name)
 	}
-
-	// Hand the session over: kill headless, mark visiting.
-	o.dropEng(t.ID)
-	prev := t.Status
-	t.Status = store.TicketVisiting
-	if err := o.d.UpdateTicket(t); err != nil {
-		return "", err
+	o.dropEM(p.ID)
+	dir := o.d.Paths.ProjectDir(p.Name)
+	// Same MCP tools as the headless EM, so the interactive session can
+	// delegate tickets too. (pi has no MCP — its tools already reach the
+	// daemon through the `hq em` CLI documented in the session's prompt.)
+	extra := []string{}
+	if o.emHarness.SupportsMCP() {
+		if mcp := filepath.Join(dir, "mcp.json"); fileExists(mcp) {
+			extra = append(extra, "--mcp-config", mcp)
+		}
 	}
-
-	winName := "hq-" + strings.TrimPrefix(t.ID, "tkt_")
-	if err := o.openVisitWindow(tmuxSession, winName, t.WorktreePath, t.SessionID, o.engModel(t)); err != nil {
-		t.Status = prev
-		o.d.UpdateTicket(t)
-		return "", err
-	}
-
-	go o.watchVisitWindow(t, winName, prev)
-	return winName, nil
+	argv := o.emHarness.InteractiveCommand(p.EMSessionID, p.EMModel, extra...)
+	return Checkout{Argv: argv, Dir: dir}, nil
 }
 
-// watchVisitWindow polls for the tmux window; when it's gone the boss is
-// done steering and headless supervision resumes on the same session. A
-// ticket that was already terminal before the visit returns to that status
-// instead of being parked.
-func (o *Orch) watchVisitWindow(t store.Ticket, winName string, prev store.TicketStatus) {
-	for {
-		time.Sleep(3 * time.Second)
-		out, err := exec.Command("tmux", "list-windows", "-a", "-F", "#{window_name}").Output()
-		if err != nil || !strings.Contains(string(out), winName) {
-			break
-		}
+// checkoutEngineer hands a ticket's engineer session over for interactive
+// use in its worktree. The headless process is closed first so exactly one
+// process owns the session; checkin resumes supervision.
+func (o *Orch) checkoutEngineer(ticketID string) (Checkout, error) {
+	t, err := o.d.Store.TicketByID(ticketID)
+	if err != nil {
+		return Checkout{}, err
 	}
-	cur, err := o.d.Store.TicketByID(t.ID)
-	if err != nil || cur.Status != store.TicketVisiting {
-		return // ticket moved on while visiting
+	if t.SessionID == "" || t.WorktreePath == "" {
+		return Checkout{}, fmt.Errorf("ticket has no live session/worktree to visit")
 	}
+
+	o.dropEng(t.ID)
+
+	o.mu.Lock()
+	o.visitPrev[t.ID] = t.Status
+	o.mu.Unlock()
+
+	t.Status = store.TicketVisiting
+	if err := o.d.UpdateTicket(t); err != nil {
+		o.mu.Lock()
+		delete(o.visitPrev, t.ID)
+		o.mu.Unlock()
+		return Checkout{}, err
+	}
+
+	argv := o.harness.InteractiveCommand(t.SessionID, o.engModel(t))
+	return Checkout{Argv: argv, Dir: t.WorktreePath}, nil
+}
+
+// checkinEM is a no-op: the EM has no visiting status to restore — the next
+// project message just resumes the session headlessly as usual.
+func (o *Orch) checkinEM(projectID string) error { return nil }
+
+// checkinEngineer restores headless supervision after the human checks back
+// in — whether by explicit detach or the interactive process exiting on its
+// own. A ticket that was already terminal before checkout returns to that
+// status instead of being parked.
+func (o *Orch) checkinEngineer(ticketID string) error {
+	cur, err := o.d.Store.TicketByID(ticketID)
+	if err != nil {
+		return err
+	}
+	if cur.Status != store.TicketVisiting {
+		return nil // ticket moved on while checked out
+	}
+
+	o.mu.Lock()
+	prev, ok := o.visitPrev[ticketID]
+	delete(o.visitPrev, ticketID)
+	o.mu.Unlock()
+	if !ok {
+		prev = store.TicketNeedsInput
+	}
+
 	if prev.Terminal() {
 		cur.Status = prev
-		if err := o.d.UpdateTicket(cur); err != nil {
-			o.log.Error("update ticket", "err", err)
-		}
-		return
+		return o.d.UpdateTicket(cur)
 	}
 	cur.Status = store.TicketNeedsInput
 	if err := o.d.UpdateTicket(cur); err != nil {
-		o.log.Error("update ticket", "err", err)
+		return err
 	}
 	o.systemMessage(cur.ProjectID, cur.ID,
 		"desk visit ended — reply in this thread to resume headless supervision")
-}
-
-func shellJoin(argv []string) string {
-	quoted := make([]string, len(argv))
-	for i, a := range argv {
-		if strings.ContainsAny(a, " \t\"'$") {
-			quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
-		} else {
-			quoted[i] = a
-		}
-	}
-	return strings.Join(quoted, " ")
+	return nil
 }

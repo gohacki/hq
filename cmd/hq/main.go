@@ -14,10 +14,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gohacki/hq/internal/agent"
 	"github.com/gohacki/hq/internal/agent/claude"
+	"github.com/gohacki/hq/internal/agent/pi"
 	"github.com/gohacki/hq/internal/config"
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/orch"
@@ -47,16 +51,27 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "daemon":
-		if len(args) > 1 && args[1] == "run" {
-			return runDaemon(paths)
+		if len(args) > 1 {
+			switch args[1] {
+			case "run":
+				return runDaemon(paths)
+			case "stop":
+				return stopDaemon(paths)
+			case "restart":
+				return restartDaemon(paths)
+			}
 		}
-		return fmt.Errorf("usage: hq daemon run")
+		return fmt.Errorf("usage: hq daemon run|stop|restart")
 	case "doctor":
 		return runDoctor()
 	case "call":
 		return runCall(paths, args[1:])
 	case "mcp-em":
 		return orch.RunEMMCP(paths, args[1:])
+	case "em":
+		return orch.RunEMCLI(paths, args[1:])
+	case "chat-header":
+		return runChatHeader(paths, args[1:])
 	case "help", "--help", "-h":
 		fmt.Print(helpText)
 		return nil
@@ -71,21 +86,24 @@ const helpText = `hq — an engineering department as a program.
 Usage:
   hq                       open the TUI (auto-starts the daemon)
   hq daemon run            run the daemon in the foreground
+  hq daemon stop           stop the daemon (agents resume on next boot)
+  hq daemon restart        swap in the current hq binary; sessions resume
   hq doctor                check required external tools
   hq call <method> [json]  raw RPC to the daemon (scripting/debugging)
   hq help                  this help
 
 The one-minute tour:
-  You are the boss. The PM in the Conference Room creates projects ("new
-  project myapp with repo ~/code/myapp"). Each project has an EM that plans
-  and delegates tickets to engineer agents working in isolated git
-  worktrees. Everything that needs YOU — plan reviews, demos, questions —
-  queues in MY OFFICE, the home screen. Everything else stays out of sight.
+  You are the boss. The ◆ hq director creates projects ("new project myapp
+  with repo ~/code/myapp"). Each project has an EM that plans and delegates
+  tickets to engineer agents working in isolated git worktrees. The home
+  screen is the KANBAN BOARD; everything that needs YOU — plan reviews,
+  demos, questions — is pinned in the sidebar's ⚠ NEEDS YOU inbox. Opening
+  a ticket is a chat with the EM and its engineer.
 
-In the TUI:
-  j/k + enter  work the office queue      a      approve demo/handbook edit
-  b            department board           v      visit an agent's desk (tmux)
-  tab          sidebar (PM, projects)     M      presence (heads-down/avail/review)
+In the TUI (vim-native):
+  h/l/j/k gg G enter   move / open        a      approve demo/handbook edit
+  b            board (home)               v      attach a live session (tmux window)
+  / and :      search / command line      M      presence (heads-down/avail/review)
   ?            full help overlay          q      quit (the department keeps working)
 
 Everyone runs sonnet by default; upgrade any agent live with /model or by
@@ -112,11 +130,79 @@ func runDaemon(paths config.Paths) error {
 	defer st.Close()
 
 	d := daemon.New(paths, st, log)
-	d.Orch = orch.New(d, claude.New(), log)
+	d.Orch = orch.New(d, claude.New(), managerHarness(paths, log), log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return d.Run(ctx)
+}
+
+// managerHarness picks what the director and EMs run on: pi (the
+// open-source harness, rendered natively in the TUI) when it's installed
+// or forced, Claude Code otherwise. HQ_EM_HARNESS=pi|claude overrides.
+func managerHarness(paths config.Paths, log *slog.Logger) agent.Harness {
+	choice := os.Getenv("HQ_EM_HARNESS")
+	if choice == "" {
+		if _, err := exec.LookPath("pi"); err == nil {
+			choice = "pi"
+		} else {
+			choice = "claude"
+		}
+	}
+	if choice == "pi" {
+		log.Info("manager harness: pi")
+		return pi.New(paths.PiSessionsDir())
+	}
+	log.Info("manager harness: claude")
+	return claude.New()
+}
+
+// stopDaemon SIGTERMs the daemon named by the pid file and waits for it to
+// exit. Agent sessions are closed cleanly and resume on the next boot.
+func stopDaemon(paths config.Paths) error {
+	b, err := os.ReadFile(paths.PIDPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("daemon not running")
+			return nil
+		}
+		return err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("bad pid file %s: %w", paths.PIDPath(), err)
+	}
+	proc, _ := os.FindProcess(pid)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		os.Remove(paths.PIDPath())
+		fmt.Println("daemon not running (stale pid file removed)")
+		return nil
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			fmt.Println("daemon stopped")
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon (pid %d) did not stop within 10s", pid)
+}
+
+// restartDaemon is the self-hosting deploy command: stop the old daemon,
+// start one from the current binary, and let Reconcile resume every
+// engineer session where it left off.
+func restartDaemon(paths config.Paths) error {
+	if err := stopDaemon(paths); err != nil {
+		return err
+	}
+	cl, err := connect(paths)
+	if err != nil {
+		return err
+	}
+	cl.Close()
+	fmt.Println("daemon restarted — agent sessions resume automatically")
+	return nil
 }
 
 // connect dials the daemon, auto-starting it if the socket is dead.
@@ -151,7 +237,21 @@ func runTUI(paths config.Paths) error {
 		return err
 	}
 	defer cl.Close()
-	return tui.Run(cl)
+	// redial keeps the TUI alive across daemon restarts: wait for whoever is
+	// restarting the daemon (hq daemon restart, a deploy) to bring it back
+	// before falling back to auto-starting one ourselves — auto-starting too
+	// eagerly would race a restart and resurrect the old binary.
+	redial := func() (*rpc.Client, error) {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if cl, err := rpc.Dial(paths.SocketPath()); err == nil {
+				return cl, nil
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return connect(paths)
+	}
+	return tui.Run(cl, redial)
 }
 
 // runCall is a scripting/debugging passthrough: `hq call <method>
@@ -178,17 +278,22 @@ func runCall(paths config.Paths, args []string) error {
 }
 
 func runDoctor() error {
-	tools := []struct{ name, why string }{
-		{"claude", "agent harness (required)"},
-		{"tmux", "desk visits (required for v)"},
-		{"treehouse", "worktree pools (required for engineers)"},
-		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)"},
-		{"git", "everything"},
+	tools := []struct {
+		name, why string
+		optional  bool
+	}{
+		{"claude", "engineer harness (required)", false},
+		{"pi", "manager harness for the director/EMs (falls back to claude)", true},
+		{"tmux", "live agent sessions (required for chat's v/t — run hq inside it)", false},
+		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)", false},
+		{"git", "worktrees + everything else", false},
 	}
 	ok := true
 	for _, t := range tools {
 		if p, err := exec.LookPath(t.name); err == nil {
 			fmt.Printf("  ok  %-12s %s\n", t.name, p)
+		} else if t.optional {
+			fmt.Printf("  --  %-12s %s\n", t.name, t.why)
 		} else {
 			fmt.Printf("MISS  %-12s %s\n", t.name, t.why)
 			ok = false

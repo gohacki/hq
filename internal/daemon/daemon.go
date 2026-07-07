@@ -21,13 +21,16 @@ import (
 // reach agents. The daemon core stays deterministic and testable behind it.
 type Orchestrator interface {
 	// BossProjectMessage handles a boss message in a project's main scroll
-	// (routes to the project's EM, or the PM in the conference room).
+	// (routes to the project's EM, or the director in the director room).
 	BossProjectMessage(ctx context.Context, p store.Project, body string)
 	// BossTicketMessage handles a boss reply inside a ticket thread (steers
 	// the engineer).
 	BossTicketMessage(ctx context.Context, t store.Ticket, body string)
 	// Reconcile is called at boot with all non-terminal tickets.
 	Reconcile(ctx context.Context, tickets []store.Ticket)
+	// Shutdown is called when the daemon is stopping; it closes live agent
+	// sessions so they resume cleanly on the next boot.
+	Shutdown()
 }
 
 type Daemon struct {
@@ -57,7 +60,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer os.Remove(d.Paths.PIDPath())
-	if err := d.ensureConferenceRoom(); err != nil {
+	if err := d.ensureDirectorRoom(); err != nil {
 		return err
 	}
 	if d.Orch != nil {
@@ -68,27 +71,47 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Orch.Reconcile(ctx, active)
 	}
 	d.Log.Info("daemon listening", "socket", d.Paths.SocketPath())
-	return d.Server.Serve(ctx)
+	err := d.Server.Serve(ctx)
+	if d.Orch != nil {
+		d.Orch.Shutdown()
+	}
+	return err
 }
 
-// ConferenceRoomName is the built-in project where the PM lives: project
-// intake, cross-project questions.
-const ConferenceRoomName = "conference-room"
+// legacyDirectorRoomName is the pre-rename name of the director's project;
+// ensureDirectorRoom migrates it at boot.
+const legacyDirectorRoomName = "conference-room"
 
-func (d *Daemon) ensureConferenceRoom() error {
-	_, err := d.Store.ProjectByName(ConferenceRoomName)
+// ensureDirectorRoom guarantees the built-in director project exists,
+// migrating a legacy "conference-room" row (and its data dir) in place so
+// history, session id, and handbook survive the rename.
+func (d *Daemon) ensureDirectorRoom() error {
+	_, err := d.Store.ProjectByName(store.DirectorRoomName)
 	if err == nil {
 		return nil
 	}
 	if err != store.ErrNotFound {
 		return err
 	}
-	_, err = d.CreateProject(ConferenceRoomName, nil, "local-only", "none")
+	if p, err := d.Store.ProjectByName(legacyDirectorRoomName); err == nil {
+		oldDir, newDir := d.Paths.ProjectDir(p.Name), d.Paths.ProjectDir(store.DirectorRoomName)
+		if _, statErr := os.Stat(oldDir); statErr == nil {
+			if err := os.Rename(oldDir, newDir); err != nil {
+				return err
+			}
+		} else if err := os.MkdirAll(newDir, 0o755); err != nil {
+			return err
+		}
+		return d.Store.RenameProject(p.ID, store.DirectorRoomName, filepath.Join(newDir, "handbook.md"))
+	} else if err != store.ErrNotFound {
+		return err
+	}
+	_, err = d.CreateProject(store.DirectorRoomName, nil, "local-only", "none")
 	return err
 }
 
 // PostMessage appends a message and publishes it to subscribers. It is the
-// single choke point every message (boss, pm, em, eng, system) goes through.
+// single choke point every message (boss, em, eng, system) goes through.
 func (d *Daemon) PostMessage(m store.Message) (store.Message, error) {
 	id, err := d.Store.AppendMessage(m)
 	if err != nil {
@@ -209,8 +232,8 @@ func (d *Daemon) CreateProject(name string, repoPaths []string, delivery, verify
 	return p, nil
 }
 
-// addRepo registers a local repo with a project and makes sure it has a
-// treehouse pool config so engineer worktrees can be leased from it.
+// addRepo registers a local repo with a project. Nothing is written into
+// the repo itself — worktrees are native git worktrees under hq's data dir.
 func (d *Daemon) addRepo(p store.Project, path string) (store.Repo, error) {
 	abs, err := filepath.Abs(expandHome(path))
 	if err != nil {
@@ -226,9 +249,6 @@ func (d *Daemon) addRepo(p store.Project, path string) (store.Repo, error) {
 		Name:          filepath.Base(abs),
 		Path:          abs,
 		DefaultBranch: branch,
-	}
-	if err := ensureTreehouseConfig(abs); err != nil {
-		return store.Repo{}, err
 	}
 	if err := d.Store.AddRepo(r); err != nil {
 		return store.Repo{}, err
@@ -257,14 +277,6 @@ func gitDefaultBranch(repo string) string {
 	return "main"
 }
 
-func ensureTreehouseConfig(repo string) error {
-	p := filepath.Join(repo, "treehouse.toml")
-	if _, err := os.Stat(p); err == nil {
-		return nil
-	}
-	// Minimal pool config; worktrees land under $HOME/.treehouse by default.
-	return os.WriteFile(p, []byte("max_trees = 16\nroot = \"\"\n"), 0o644)
-}
 
 // --- RPC handlers ---
 
@@ -343,7 +355,7 @@ func (d *Daemon) registerHandlers() {
 
 	d.Server.Handle("tickets.list", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ProjectID string `json:"project_id"` // "" = all projects (board / PM)
+			ProjectID string `json:"project_id"` // "" = all projects (board / director)
 		}](raw)
 		if err != nil {
 			return nil, err

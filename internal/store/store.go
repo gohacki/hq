@@ -108,6 +108,16 @@ CREATE TABLE IF NOT EXISTS settings (
   key   TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS worktrees (
+  id         TEXT PRIMARY KEY,
+  ticket_id  TEXT NOT NULL REFERENCES tickets(id) ON DELETE CASCADE,
+  repo_id    TEXT NOT NULL DEFAULT '',
+  repo_path  TEXT NOT NULL DEFAULT '',
+  path       TEXT NOT NULL,
+  branch     TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_worktrees_ticket ON worktrees(ticket_id);
 `
 
 func (s *Store) migrate() error {
@@ -133,6 +143,11 @@ type Project struct {
 	CreatedAt    int64
 }
 
+// DirectorRoomName is the built-in project where the Director lives:
+// project intake, cross-project questions. Formerly "conference-room";
+// the daemon migrates legacy rows at boot.
+const DirectorRoomName = "director"
+
 const projectCols = `id, name, delivery, verify, em_model, eng_model, handbook_path, em_session_id, created_at`
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
@@ -148,6 +163,13 @@ func (s *Store) CreateProject(p Project) error {
 	}
 	_, err := s.db.Exec(`INSERT INTO projects (`+projectCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Delivery, p.Verify, p.EMModel, p.EngModel, p.HandbookPath, p.EMSessionID, p.CreatedAt)
+	return err
+}
+
+// RenameProject updates a project's name and handbook path in place (used
+// by the conference-room → director boot migration).
+func (s *Store) RenameProject(id, name, handbookPath string) error {
+	_, err := s.db.Exec(`UPDATE projects SET name=?, handbook_path=? WHERE id=?`, name, handbookPath, id)
 	return err
 }
 
@@ -184,6 +206,35 @@ func (s *Store) ProjectByID(id string) (Project, error) {
 	return p, err
 }
 
+// DeleteProject removes a project and everything scoped to it: repos,
+// tickets, messages, and plans cascade via foreign keys (schema has
+// ON DELETE CASCADE + foreign_keys=ON in the DSN); items and reads have no
+// FK (items has no constraint at all, and reads is keyed by a scope string,
+// not project_id) so they're deleted explicitly in the same transaction.
+// Callers are responsible for anything outside the DB — live agent
+// processes, leased worktrees, on-disk project files.
+func (s *Store) DeleteProject(id string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM items WHERE project_id = ?`, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM reads WHERE scope_id = ? OR scope_id LIKE ?`, id, id+":%"); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`DELETE FROM projects WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return tx.Commit()
+}
+
 func (s *Store) SetProjectEMSession(id, sessionID string) error {
 	_, err := s.db.Exec(`UPDATE projects SET em_session_id = ? WHERE id = ?`, sessionID, id)
 	return err
@@ -191,6 +242,11 @@ func (s *Store) SetProjectEMSession(id, sessionID string) error {
 
 func (s *Store) SetProjectDelivery(id, delivery string) error {
 	_, err := s.db.Exec(`UPDATE projects SET delivery = ? WHERE id = ?`, delivery, id)
+	return err
+}
+
+func (s *Store) SetProjectVerify(id, verify string) error {
+	_, err := s.db.Exec(`UPDATE projects SET verify = ? WHERE id = ?`, verify, id)
 	return err
 }
 
@@ -329,7 +385,7 @@ func (s *Store) TicketsForProject(projectID string) ([]Ticket, error) {
 	return s.queryTickets(`SELECT `+ticketCols+` FROM tickets WHERE project_id = ? ORDER BY created_at DESC`, projectID)
 }
 
-// AllTickets returns every ticket (PM cross-project view, board).
+// AllTickets returns every ticket (director cross-project view, board).
 func (s *Store) AllTickets() ([]Ticket, error) {
 	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets ORDER BY updated_at DESC`)
 }
@@ -339,10 +395,72 @@ func (s *Store) ActiveTickets() ([]Ticket, error) {
 	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets WHERE status NOT IN ('done','failed','abandoned')`)
 }
 
+// --- worktrees (one set per ticket: a tree per project repo) ---
+
+type Worktree struct {
+	ID        string
+	TicketID  string
+	RepoID    string
+	RepoPath  string
+	Path      string
+	Branch    string
+	CreatedAt int64
+}
+
+func (s *Store) AddWorktree(w Worktree) error {
+	if w.ID == "" {
+		w.ID = NewID("wt")
+	}
+	w.CreatedAt = now()
+	_, err := s.db.Exec(`INSERT INTO worktrees (id, ticket_id, repo_id, repo_path, path, branch, created_at) VALUES (?,?,?,?,?,?,?)`,
+		w.ID, w.TicketID, w.RepoID, w.RepoPath, w.Path, w.Branch, w.CreatedAt)
+	return err
+}
+
+func (s *Store) WorktreesForTicket(ticketID string) ([]Worktree, error) {
+	rows, err := s.db.Query(`SELECT id, ticket_id, repo_id, repo_path, path, branch, created_at FROM worktrees WHERE ticket_id = ? ORDER BY created_at, id`, ticketID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Worktree
+	for rows.Next() {
+		var w Worktree
+		if err := rows.Scan(&w.ID, &w.TicketID, &w.RepoID, &w.RepoPath, &w.Path, &w.Branch, &w.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteWorktree(id string) error {
+	_, err := s.db.Exec(`DELETE FROM worktrees WHERE id = ?`, id)
+	return err
+}
+
+// TicketsWithWorktrees returns ids of tickets that still hold worktree rows.
+func (s *Store) TicketsWithWorktrees() ([]string, error) {
+	rows, err := s.db.Query(`SELECT DISTINCT ticket_id FROM worktrees`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 // DoneTicketsWithWorktree returns done tickets whose worktree lease was never
 // returned (teardown interrupted, e.g. daemon restart).
 func (s *Store) DoneTicketsWithWorktree() ([]Ticket, error) {
-	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets WHERE status = 'done' AND worktree_path != ''`)
+	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets WHERE status = 'done' AND (worktree_path != '' OR id IN (SELECT ticket_id FROM worktrees))`)
 }
 
 // --- messages ---

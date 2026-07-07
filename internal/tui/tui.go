@@ -7,7 +7,6 @@ package tui
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -21,26 +20,37 @@ import (
 	"github.com/gohacki/hq/internal/store"
 )
 
-func Run(cl *rpc.Client) error {
+// Run drives the TUI. redial (optional) reconnects to the daemon when the
+// socket drops — e.g. across an `hq daemon restart` — so the TUI survives
+// daemon deploys instead of dying with the connection.
+func Run(cl *rpc.Client, redial func() (*rpc.Client, error)) error {
 	if err := cl.Subscribe(); err != nil {
 		return err
 	}
 	m := newModel(cl)
+	m.redial = redial
 	p := tea.NewProgram(m, tea.WithAltScreen())
-	go func() {
-		for ev := range cl.Events() {
-			p.Send(daemonEvent{ev})
-		}
-		p.Send(daemonGone{})
-	}()
+	m.sendMsg = p.Send // lets background pumps (e.g. a live agent's pty) push repaints
+	go pumpEvents(cl, p.Send)
 	_, err := p.Run()
 	return err
+}
+
+// pumpEvents forwards daemon events into the tea loop until the connection
+// dies, then reports it. Restarted with a fresh client after a reconnect.
+func pumpEvents(cl *rpc.Client, send func(tea.Msg)) {
+	for ev := range cl.Events() {
+		send(daemonEvent{ev})
+	}
+	send(daemonGone{})
 }
 
 // --- tea messages ---
 
 type daemonEvent struct{ ev rpc.Event }
 type daemonGone struct{}
+type daemonBack struct{ cl *rpc.Client }
+type daemonDead struct{ err error }
 type refreshed struct {
 	projects []daemon.ProjectView
 	tickets  []daemon.TicketView // open project's tickets
@@ -50,18 +60,28 @@ type refreshed struct {
 	presence string
 }
 type planLoaded struct{ plan store.Plan }
+type docLoaded struct{ title, body string }
 type errMsg struct{ err error }
 type statusMsg struct{ s string }
+
+// attachOpened says a live session was checked out and its tmux window is
+// up. attachClosed (pushed by watchAttachPane via model.sendMsg) says the
+// CLI pane died — the human exited the session or killed the window.
+type attachOpened struct {
+	winID, paneID       string
+	projectID, ticketID string
+}
+type attachClosed struct{ paneID string }
 
 // --- screens & focus ---
 
 type screen int
 
 const (
-	screenOffice screen = iota
+	screenBoard screen = iota // home: the kanban
 	screenChat
 	screenPlan
-	screenBoard
+	screenDoc // read-only pager (the project playbook)
 )
 
 type focusArea int
@@ -73,7 +93,9 @@ const (
 )
 
 type model struct {
-	cl *rpc.Client
+	cl      *rpc.Client
+	redial  func() (*rpc.Client, error) // reconnect after the socket drops (nil = die)
+	sendMsg func(tea.Msg)               // == tea.Program.Send; lets pump goroutines push repaints
 
 	projects []daemon.ProjectView
 	tickets  []daemon.TicketView // of the open project
@@ -82,23 +104,37 @@ type model struct {
 	items    []store.Item // open office items
 	presence string
 
-	screen      screen
-	focus       focusArea
-	showHelp    bool
-	expandChat  bool // ticket timeline: x = full chat
-	tmuxSession string
+	screen     screen
+	focus      focusArea
+	showHelp   bool
+	expandChat bool // ticket thread: x = expand collapsed engineer chatter
+
+	// live agent session: checked out into a new tmux window (header pane +
+	// the real harness CLI). Exactly one is ever attached.
+	attachWin     string // attached window id ("" if none)
+	attachPane    string // its CLI pane id (watched for exit)
+	attachProject string
+	attachTicket  string
+
+	// attach picker overlay
+	pickerOpen   bool
+	picker       []pickerItem
+	pickerCursor int
 
 	// sidebar
 	side       []sideItem
 	sideCursor int
 
+	// board scope
+	boardProject string // project id ("" = all projects)
+
+	// doc pager (screenDoc)
+	docTitle string
+	docBody  string
+
 	// chat scope
 	openProject string // project id
 	openTicket  string // ticket id ("" = project scroll)
-
-	// office
-	officeCursor int
-	optionsMode  bool // selected options item awaits 1-9
 
 	// plan review
 	plan        store.Plan
@@ -118,6 +154,16 @@ type model struct {
 	innerH    int
 	status    string
 	ready     bool
+
+	// vim layer
+	pendingG    bool   // a "g" was pressed — the next "g" jumps to the top
+	cmdMode     byte   // 0 none · ':' command-line · '/' search (see vim.go)
+	cmdBuf      string // text typed after : or /
+	searchQuery string // last accepted / pattern; n/N reuse it
+
+	bootstrapped bool // set on the first refresh; decides the landing screen once
+
+	confirmDeleteProjectID string // armed by "D" on a project row; confirmed by "D" again
 }
 
 type planTicketRow struct {
@@ -143,12 +189,9 @@ func newModel(cl *rpc.Client) *model {
 	ta.SetHeight(3)
 	ta.CharLimit = 0
 	ta.ShowLineNumbers = false
-	m := &model{cl: cl, screen: screenOffice, focus: focusMain, presence: "available", planAnswer: -1}
-	if os.Getenv("TMUX") != "" {
-		if out, err := exec.Command("tmux", "display-message", "-p", "#S").Output(); err == nil {
-			m.tmuxSession = strings.TrimSpace(string(out))
-		}
-	}
+	// focusSidebar so the row you're on is visible from the first frame —
+	// otherwise the cursor is there but unrendered until you tab to it.
+	m := &model{cl: cl, screen: screenBoard, focus: focusSidebar, presence: "available", planAnswer: -1}
 	m.composer = ta
 	return m
 }
@@ -160,6 +203,9 @@ func (m *model) Init() tea.Cmd {
 // refresh re-pulls everything the current view needs. Cheap: local socket.
 func (m *model) refresh() tea.Cmd {
 	openProject, openTicket := m.openProject, m.openTicket
+	if openProject == "" {
+		openProject = m.boardProject // sidebar nests tickets under the board's scope too
+	}
 	return func() tea.Msg {
 		var r refreshed
 		if err := m.cl.Call("projects.list", nil, &r.projects); err != nil {
@@ -186,6 +232,26 @@ func (m *model) refresh() tea.Cmd {
 		}
 		return r
 	}
+}
+
+// hasProjects reports whether the boss has briefed anything beyond the
+// built-in director room yet.
+func (m *model) hasProjects() bool {
+	for _, p := range m.projects {
+		if p.Name != store.DirectorRoomName {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *model) directorRoomID() string {
+	for _, p := range m.projects {
+		if p.Name == store.DirectorRoomName {
+			return p.ID
+		}
+	}
+	return ""
 }
 
 func (m *model) markRead() tea.Cmd {
@@ -236,7 +302,32 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonGone:
-		m.status = "daemon connection lost — restart hq"
+		if m.redial == nil {
+			m.status = "daemon connection lost — restart hq"
+			return m, nil
+		}
+		m.status = "daemon connection lost — reconnecting…"
+		redial := m.redial
+		return m, func() tea.Msg {
+			cl, err := redial()
+			if err != nil {
+				return daemonDead{err}
+			}
+			if err := cl.Subscribe(); err != nil {
+				cl.Close()
+				return daemonDead{err}
+			}
+			return daemonBack{cl}
+		}
+
+	case daemonBack:
+		m.cl = msg.cl
+		go pumpEvents(m.cl, m.sendMsg)
+		m.status = "reconnected to the daemon"
+		return m, m.refresh()
+
+	case daemonDead:
+		m.status = "daemon unreachable (" + msg.err.Error() + ") — fix it and restart hq"
 		return m, nil
 
 	case errMsg:
@@ -254,15 +345,64 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.messages = msg.messages
 		m.items = msg.items
 		m.presence = msg.presence
-		if m.officeCursor >= len(m.items) {
-			m.officeCursor = max(0, len(m.items)-1)
-		}
 		m.rebuildSidebar()
+		if m.screen == screenBoard {
+			m.normalizeBoardSel()
+		}
+		if !m.bootstrapped {
+			m.bootstrapped = true
+			if len(m.items) == 0 && !m.hasProjects() {
+				// Nothing needs you and there's no project yet to brief —
+				// land straight in the hq home chat instead of an empty board.
+				if cr := m.directorRoomID(); cr != "" {
+					return m, tea.Batch(m.openChat(cr, ""), m.markRead())
+				}
+			}
+			// Otherwise: the board, with the sidebar cursor on the first
+			// inbox item (rebuildSidebar puts the inbox on top).
+		}
 		m.renderMain()
 		return m, m.markRead()
 
+	case attachOpened:
+		m.attachWin = msg.winID
+		m.attachPane = msg.paneID
+		m.attachProject = msg.projectID
+		m.attachTicket = msg.ticketID
+		m.status = "live session open in its own tmux window — close it (or exit the CLI) to hand back"
+		paneID := msg.paneID
+		go watchAttachPane(paneID, func() { m.sendMsg(attachClosed{paneID}) })
+		return m, nil
+
+	case attachClosed:
+		if msg.paneID != m.attachPane {
+			return m, nil // stale — already closed/replaced from hq's side
+		}
+		winID := m.attachWin
+		projectID, ticketID := m.attachProject, m.attachTicket
+		m.attachWin, m.attachPane, m.attachProject, m.attachTicket = "", "", "", ""
+		m.status = "session handed back — headless supervision resumes on your next message"
+		return m, tea.Batch(m.refresh(), func() tea.Msg {
+			killWindow(winID) // the CLI pane died; take the header pane's window with it
+			params := map[string]any{}
+			if ticketID != "" {
+				params["ticket_id"] = ticketID
+			} else {
+				params["project_id"] = projectID
+			}
+			m.cl.Call("session.checkin", params, nil)
+			return nil
+		})
+
 	case planLoaded:
-		m.openPlanScreen(msg.plan)
+		return m, m.openPlanScreen(msg.plan)
+
+	case docLoaded:
+		m.docTitle = msg.title
+		m.docBody = msg.body
+		m.screen = screenDoc
+		m.focus = focusMain
+		m.renderMain()
 		return m, nil
 
 	case daemonEvent:

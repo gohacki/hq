@@ -11,17 +11,27 @@ import (
 	"github.com/gohacki/hq/internal/store"
 )
 
+// The sidebar is hq's constant left rail, in three stacked sections:
+//
+//	⚠ needs you   — the inbox: every open attention item, interrupts first
+//	projects      — all-projects board, the hq home chat, each project
+//	                (tickets nest under the focused project)
+//	staff         — the focused project's EM and live engineers
+//
+// The kanban board is the home screen; the inbox is pinned on top because
+// "what needs me right now" is the first question the screen must answer.
+
 type rowKind int
 
 const (
-	rowOffice rowKind = iota
-	rowConference
+	rowItem rowKind = iota // inbox: an open attention item
 	rowHeader
-	rowProject
-	rowTicket // ticket thread nested under the open project
-	rowEM     // staff: the open project's manager
-	rowEng    // staff: a live engineer (enter = desk visit)
-	rowBoard
+	rowAll     // board, all projects
+	rowHome    // the hq home chat (director)
+	rowProject // enter = that project's board
+	rowTicket  // ticket thread nested under the focused project
+	rowEM      // staff: the focused project's manager
+	rowEng     // staff: a live engineer
 )
 
 type sideItem struct {
@@ -29,38 +39,94 @@ type sideItem struct {
 	label   string
 	project daemon.ProjectView
 	ticket  *daemon.TicketView
+	item    *store.Item
 }
 
 func (it sideItem) selectable() bool { return it.kind != rowHeader }
 
-func (m *model) rebuildSidebar() {
-	m.side = m.side[:0]
-	m.side = append(m.side, sideItem{kind: rowOffice}, sideItem{kind: rowBoard})
+// focusedProjectID is the project the sidebar nests tickets/staff under:
+// the board's scope, or the open chat's project.
+func (m *model) focusedProjectID() string {
+	if m.screen == screenChat {
+		return m.openProject
+	}
+	return m.boardProject
+}
 
-	var conference, open daemon.ProjectView
-	for _, p := range m.projects {
-		if p.Name == "conference-room" {
-			conference = p
-			continue
+// isCurrentRow reports whether it is the screen you're actually looking at
+// right now, independent of whether the sidebar itself has keyboard focus.
+func (m *model) isCurrentRow(it sideItem) bool {
+	switch it.kind {
+	case rowAll:
+		return m.screen == screenBoard && m.boardProject == ""
+	case rowHome:
+		return m.screen == screenChat && m.openProject == it.project.ID
+	case rowProject:
+		if m.screen == screenBoard && m.boardProject == it.project.ID {
+			return true
 		}
-		if p.ID == m.openProject {
-			open = p
+		return m.screen == screenChat && m.openProject == it.project.ID && m.openTicket == ""
+	case rowTicket:
+		return m.screen == screenChat && it.ticket != nil && m.openTicket == it.ticket.ID
+	default:
+		return false
+	}
+}
+
+// openTicketCount counts non-terminal tickets of a project (badge on the
+// project row) from the department-wide list.
+func (m *model) openTicketCount(projectID string) int {
+	n := 0
+	for _, t := range m.all {
+		if t.ProjectID == projectID && !t.Status.Terminal() {
+			n++
 		}
 	}
-	m.side = append(m.side, sideItem{kind: rowConference, project: conference})
+	return n
+}
+
+func (m *model) rebuildSidebar() {
+	m.side = m.side[:0]
+
+	if len(m.items) > 0 {
+		m.side = append(m.side, sideItem{kind: rowHeader, label: fmt.Sprintf("needs you (%d)", len(m.items))})
+		for i := range m.items {
+			m.side = append(m.side, sideItem{kind: rowItem, item: &m.items[i]})
+		}
+	}
+
 	m.side = append(m.side, sideItem{kind: rowHeader, label: "projects"})
+	m.side = append(m.side, sideItem{kind: rowAll})
+
+	var home daemon.ProjectView
+	focused := m.focusedProjectID()
 	for _, p := range m.projects {
-		if p.Name == "conference-room" {
+		if p.Name == store.DirectorRoomName {
+			home = p
 			continue
 		}
+	}
+	m.side = append(m.side, sideItem{kind: rowHome, project: home})
+	var open daemon.ProjectView
+	for _, p := range m.projects {
+		if p.Name == store.DirectorRoomName {
+			continue
+		}
+		if p.ID == focused {
+			open = p
+		}
 		m.side = append(m.side, sideItem{kind: rowProject, project: p})
-		if p.ID == m.openProject && m.screen == screenChat {
+		if p.ID == focused {
 			for i := range m.tickets {
+				if m.tickets[i].Status.Terminal() && m.tickets[i].Unread == 0 {
+					continue
+				}
 				m.side = append(m.side, sideItem{kind: rowTicket, project: p, ticket: &m.tickets[i]})
 			}
 		}
 	}
-	if open.ID != "" && m.screen == screenChat {
+
+	if open.ID != "" {
 		m.side = append(m.side, sideItem{kind: rowHeader, label: "staff"})
 		m.side = append(m.side, sideItem{kind: rowEM, project: open})
 		for i := range m.tickets {
@@ -91,6 +157,10 @@ func (m *model) skipHeader(dir int) {
 }
 
 func (m *model) sidebarKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cur *sideItem
+	if m.sideCursor < len(m.side) {
+		cur = &m.side[m.sideCursor]
+	}
 	switch k.String() {
 	case "j", "down":
 		if m.sideCursor < len(m.side)-1 {
@@ -106,24 +176,36 @@ func (m *model) sidebarKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		return m.openSideCursor()
+	case "l", "right":
+		// Back into the main area (mirrors h from the main area's edge).
+		// In a chat that's thread-scroll mode — i or enter reach the composer.
+		m.focus = focusMain
+		if m.screen == screenBoard {
+			m.normalizeBoardSel() // land on a card, never an empty column
+		}
+		m.renderMain() // the column marker only draws on re-render
+		return m, nil
 	case "e":
 		return m.openHandbook()
-	case "v", "t":
-		if m.sideCursor < len(m.side) {
-			it := m.side[m.sideCursor]
-			switch {
-			case it.kind == rowEM:
-				return m, m.call("em.visit", map[string]any{"project_id": it.project.ID, "tmux_session": m.tmuxSession}, "")
-			case it.ticket != nil:
-				return m, m.call("ticket.visit", map[string]any{"ticket_id": it.ticket.ID, "tmux_session": m.tmuxSession}, "")
-			}
+	case "a":
+		if cur != nil && cur.kind == rowItem {
+			return m.approveItem(cur.item)
+		}
+		return m, nil
+	case "r":
+		if cur != nil && cur.kind == rowItem {
+			return m.retryItem(cur.item)
+		}
+		return m, nil
+	case "x", "d":
+		if cur != nil && cur.kind == rowItem {
+			return m.dismissItem(cur.item)
 		}
 		return m, nil
 	case "esc":
-		m.screen = screenOffice
-		m.focus = focusMain
-		m.renderMain()
-		return m, nil
+		return m.escBack()
+	case "D":
+		return m.deleteProjectKey()
 	}
 	return m, nil
 }
@@ -134,25 +216,40 @@ func (m *model) openSideCursor() (tea.Model, tea.Cmd) {
 	}
 	it := m.side[m.sideCursor]
 	switch it.kind {
-	case rowOffice:
-		m.screen = screenOffice
-		m.focus = focusMain
-		m.renderMain()
-		return m, m.refresh()
-	case rowBoard:
-		m.screen = screenBoard
-		m.focus = focusMain
-		m.renderMain()
-		return m, m.refresh()
-	case rowConference, rowProject:
+	case rowItem:
+		return m.openItem(it.item)
+	case rowAll:
+		return m, m.gotoBoard("")
+	case rowHome:
 		return m, m.openChat(it.project.ID, "")
-	case rowTicket:
+	case rowProject:
+		return m, m.gotoBoard(it.project.ID)
+	case rowTicket, rowEng:
 		return m, m.openChat(it.project.ID, it.ticket.ID)
 	case rowEM:
-		return m, m.call("em.visit", map[string]any{"project_id": it.project.ID, "tmux_session": m.tmuxSession}, "")
-	case rowEng:
-		return m, m.call("ticket.visit", map[string]any{"ticket_id": it.ticket.ID, "tmux_session": m.tmuxSession}, "")
+		return m, m.openChat(it.project.ID, "")
 	}
+	return m, nil
+}
+
+// deleteProjectKey implements the sidebar's "D": armed on a project row,
+// confirmed by pressing D again — see the top-level handleKey disarm check,
+// which clears the arm on any other key so it can't fire later by accident.
+func (m *model) deleteProjectKey() (tea.Model, tea.Cmd) {
+	if m.sideCursor >= len(m.side) {
+		return m, nil
+	}
+	it := m.side[m.sideCursor]
+	if it.kind != rowProject {
+		return m, nil
+	}
+	if m.confirmDeleteProjectID == it.project.ID {
+		pid, name := it.project.ID, it.project.Name
+		m.confirmDeleteProjectID = ""
+		return m, m.call("project.delete", map[string]any{"project_id": pid}, "deleted "+name)
+	}
+	m.confirmDeleteProjectID = it.project.ID
+	m.status = "press D again to permanently delete " + it.project.Name + " — all its tickets, history, and worktree leases. Any other key cancels."
 	return m, nil
 }
 
@@ -188,35 +285,41 @@ func (m *model) interruptCount() int {
 func (m *model) sidebarView(height int) string {
 	var b strings.Builder
 	mode := map[string]string{"heads-down": "🎧", "available": "🟢", "review": "👀"}[m.presence]
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" ▦ hq "+mode) + "\n\n")
+	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" ▦ hq "+mode) + "\n")
 	for i, it := range m.side {
 		var line string
 		switch it.kind {
 		case rowHeader:
-			b.WriteString("\n" + styleSideHeader.Render("— "+it.label+" —") + "\n")
-			continue
-		case rowOffice:
-			badge := ""
-			if n := m.interruptCount(); n > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(n))
-			} else if len(m.items) > 0 {
-				badge = " " + styleBadgeSoft.Render(fmt.Sprint(len(m.items)))
+			hdr := styleSideHeader
+			if strings.HasPrefix(it.label, "needs you") {
+				hdr = styleTierHdr
 			}
-			line = styleSideChan.Render("◉ my office") + badge
-		case rowBoard:
-			line = styleSideChan.Render("▤ board")
-		case rowConference:
+			b.WriteString("\n" + hdr.Render("— "+it.label+" —") + "\n")
+			continue
+		case rowItem:
+			icon := itemIcon(it.item.Kind)
+			line = styleSideTask.Render(fmt.Sprintf("%s %s", icon, truncate(it.item.Title, sidebarWidth-6)))
+			if it.item.Tier == store.TierInterrupt {
+				line = styleSideChan.Render(fmt.Sprintf("%s %s", icon, truncate(it.item.Title, sidebarWidth-6)))
+			}
+		case rowAll:
+			line = styleSideChan.Render("▤ all projects")
+		case rowHome:
 			badge := ""
 			if it.project.Unread > 0 {
 				badge = " " + styleBadge.Render(fmt.Sprint(it.project.Unread))
 			}
-			line = styleSideChan.Render("◇ conference room") + badge
+			line = styleSideChan.Render("◆ hq") + badge
 		case rowProject:
 			badge := ""
 			pad := 0
+			if n := m.openTicketCount(it.project.ID); n > 0 {
+				badge = " " + styleBadgeSoft.Render(fmt.Sprint(n))
+				pad = 3 + len(fmt.Sprint(n))
+			}
 			if it.project.Unread > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(it.project.Unread))
-				pad = 3 + len(fmt.Sprint(it.project.Unread))
+				badge += " " + styleBadge.Render(fmt.Sprint(it.project.Unread))
+				pad += 3 + len(fmt.Sprint(it.project.Unread))
 			}
 			line = styleSideChan.Render("# "+truncate(it.project.Name, sidebarWidth-4-pad)) + badge
 		case rowTicket:
@@ -229,16 +332,18 @@ func (m *model) sidebarView(height int) string {
 			}
 			line = styleSideTask.Render(fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8-pad))) + badge
 		case rowEM:
-			mdl := it.project.EMModel
-			if mdl == "" {
-				mdl = "sonnet"
-			}
-			line = styleSideTask.Render(" ◉ EM · " + truncate(mdl, sidebarWidth-9))
+			line = styleSideTask.Render(" ◉ EM · " + truncate(orDefaultModel(it.project.EMModel), sidebarWidth-9))
 		case rowEng:
 			line = styleSideTask.Render(fmt.Sprintf(" %s %s", statusIcon(it.ticket.Status), truncate(it.ticket.Title, sidebarWidth-7)))
 		}
-		if i == m.sideCursor && m.focus == focusSidebar {
+		switch {
+		case i == m.sideCursor && m.focus == focusSidebar:
+			// Keyboard focus is here: bright, moveable with j/k.
 			line = styleSideSel.Render(stripANSIPad(line, sidebarWidth-2))
+		case m.isCurrentRow(it):
+			// Not focused here, but this is where you are — still worth
+			// marking, or the sidebar looks like it doesn't know where you are.
+			line = styleSideActive.Render(stripANSIPad(line, sidebarWidth-2))
 		}
 		b.WriteString(line + "\n")
 	}
