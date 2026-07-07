@@ -27,7 +27,7 @@ const (
 	rowItem rowKind = iota // inbox: an open attention item
 	rowHeader
 	rowAll     // board, all projects
-	rowHome    // the hq home chat (intake EM)
+	rowHome    // the hq home chat (director)
 	rowProject // enter = that project's board
 	rowTicket  // ticket thread nested under the focused project
 	rowEM      // staff: the focused project's manager
@@ -101,7 +101,7 @@ func (m *model) rebuildSidebar() {
 	var home daemon.ProjectView
 	focused := m.focusedProjectID()
 	for _, p := range m.projects {
-		if p.Name == "conference-room" {
+		if p.Name == store.DirectorRoomName {
 			home = p
 			continue
 		}
@@ -109,7 +109,7 @@ func (m *model) rebuildSidebar() {
 	m.side = append(m.side, sideItem{kind: rowHome, project: home})
 	var open daemon.ProjectView
 	for _, p := range m.projects {
-		if p.Name == "conference-room" {
+		if p.Name == store.DirectorRoomName {
 			continue
 		}
 		if p.ID == focused {

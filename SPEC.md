@@ -16,7 +16,7 @@ actions — not hide in channel scrollback. v2 rebuilds the UX around that.
 
 - **You: the boss.** Your surface is the **kanban board** (home) plus a
   **⚠ needs-you inbox** pinned at the top of the sidebar.
-- **Intake EM (one, global)** — the **◆ hq** home chat (no PM role).
+- **Director (one, global)** — the **◆ hq** home chat (no PM role; the director creates projects and answers cross-project questions).
   Creates projects conversationally, routes asks, knows every project's
   state (cross-project tools). Never writes code.
 - **EM (one per project)** — plans and delegates. For non-trivial asks it

@@ -64,7 +64,7 @@ again to reattach.
 
 ## Creating a project
 
-Open **◆ hq** (sidebar) and tell the intake EM:
+Open **◆ hq** (sidebar) and tell the director:
 
 > new project beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web,
 > delivery no-mistakes, verify before-delivery
@@ -129,7 +129,7 @@ recipe.
 
 **Bulk intake:** paste a ticket list to an EM ("create a ticket for each"),
 or — since agents inherit all your global Claude MCP servers — tell the
-intake EM "pull my open Linear tickets and sort them into projects".
+director "pull my open Linear tickets and sort them into projects".
 
 ## The chat banner
 

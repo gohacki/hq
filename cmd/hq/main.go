@@ -78,7 +78,7 @@ Usage:
   hq help                  this help
 
 The one-minute tour:
-  You are the boss. The ◆ hq intake EM creates projects ("new project myapp
+  You are the boss. The ◆ hq director creates projects ("new project myapp
   with repo ~/code/myapp"). Each project has an EM that plans and delegates
   tickets to engineer agents working in isolated git worktrees. The home
   screen is the KANBAN BOARD; everything that needs YOU — plan reviews,

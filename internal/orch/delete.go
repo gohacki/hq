@@ -7,7 +7,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gohacki/hq/internal/daemon"
+	"github.com/gohacki/hq/internal/store"
 )
 
 func (o *Orch) registerDeleteHandler() {
@@ -34,7 +34,7 @@ func (o *Orch) deleteProject(projectID string, force bool) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if p.Name == daemon.ConferenceRoomName {
+	if p.Name == store.DirectorRoomName {
 		return "", fmt.Errorf("the hq home chat can't be deleted")
 	}
 

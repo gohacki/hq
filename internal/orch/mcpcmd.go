@@ -11,14 +11,14 @@ import (
 	"github.com/gohacki/hq/internal/rpc"
 )
 
-// RunEMMCP implements `hq mcp-em --project <id> [--pm]`: the MCP stdio
-// server Claude Code spawns for an EM (or the PM). Every tool call turns
-// into a daemon RPC over the unix socket — managers never touch state
-// directly.
+// RunEMMCP implements `hq mcp-em --project <id> [--director]`: the MCP
+// stdio server Claude Code spawns for an EM (or the director). Every tool
+// call turns into a daemon RPC over the unix socket — managers never touch
+// state directly.
 func RunEMMCP(paths config.Paths, args []string) error {
 	fs := flag.NewFlagSet("mcp-em", flag.ContinueOnError)
 	projectID := fs.String("project", "", "project id this manager belongs to")
-	pm := fs.Bool("pm", false, "expose PM (conference room) tools")
+	director := fs.Bool("director", false, "expose director (home room) tools")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -31,7 +31,7 @@ func RunEMMCP(paths config.Paths, args []string) error {
 	}
 	defer cl.Close()
 
-	srv := &mcp.Server{Name: "hq", Version: "2.0.0", Tools: emTools(cl, *projectID, *pm)}
+	srv := &mcp.Server{Name: "hq", Version: "2.0.0", Tools: emTools(cl, *projectID, *director)}
 	return srv.Serve(os.Stdin, os.Stdout)
 }
 
@@ -44,7 +44,7 @@ func obj(props map[string]any, required ...string) map[string]any {
 
 func str(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 
-func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
+func emTools(cl *rpc.Client, projectID string, director bool) []mcp.Tool {
 	call := func(method string, params any) (string, error) {
 		var out json.RawMessage
 		if err := cl.Call(method, params, &out); err != nil {
@@ -308,7 +308,7 @@ func emTools(cl *rpc.Client, projectID string, pm bool) []mcp.Tool {
 		},
 	}
 
-	if pm {
+	if director {
 		tools = append(tools,
 			mcp.Tool{
 				Name:        "create_project",

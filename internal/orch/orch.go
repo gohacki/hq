@@ -1,4 +1,4 @@
-// Package orch is hq's orchestration layer: it runs the PM, EMs, and
+// Package orch is hq's orchestration layer: it runs the director, EMs, and
 // engineers on top of the daemon core. The daemon stays deterministic; orch
 // owns everything that touches an agent process.
 package orch
@@ -20,7 +20,7 @@ import (
 	"github.com/gohacki/hq/internal/store"
 )
 
-// emIdleTimeout closes an idle EM/PM process; its session resumes on the
+// emIdleTimeout closes an idle EM/director process; its session resumes on the
 // next message, so this only trades warm-start latency for memory.
 const emIdleTimeout = 15 * time.Minute
 
@@ -30,7 +30,7 @@ type Orch struct {
 	log     *slog.Logger
 
 	mu        sync.Mutex
-	ems       map[string]*em                // project id → live EM/PM process
+	ems       map[string]*em                // project id → live EM/director process
 	engs      map[string]*engRun            // ticket id → live engineer process
 	visitPrev map[string]store.TicketStatus // ticket id → status to restore on checkin
 }
@@ -115,11 +115,11 @@ func (o *Orch) fileTicketItem(t store.Ticket, kind store.ItemKind, tier store.It
 	}
 }
 
-// --- EM / PM lifecycle (same machinery; the PM is the conference room's EM
-// with a different prompt and tool set) ---
+// --- EM / director lifecycle (same machinery; the director is the home
+// room's EM with a different prompt and tool set) ---
 
-func (o *Orch) isConferenceRoom(p store.Project) bool {
-	return p.Name == daemon.ConferenceRoomName
+func (o *Orch) isDirectorRoom(p store.Project) bool {
+	return p.Name == store.DirectorRoomName
 }
 
 func (o *Orch) sendToEM(ctx context.Context, p store.Project, body string) error {
@@ -153,8 +153,8 @@ func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) erro
 		return err
 	}
 	sysPrompt := emSystemPrompt(p)
-	if o.isConferenceRoom(p) {
-		sysPrompt = intakeSystemPrompt()
+	if o.isDirectorRoom(p) {
+		sysPrompt = directorSystemPrompt()
 	}
 	spec := agent.Spec{
 		Model:           p.EMModel,
@@ -182,8 +182,8 @@ func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) erro
 }
 
 func (o *Orch) pumpEM(p store.Project, sess agent.Session) {
-	// The intake EM (home chat) and project EMs share the author tag: the PM
-	// role is gone — it's EMs all the way down.
+	// The director (home chat) and project EMs share the author tag —
+	// routing keys on "em"; the TUI relabels it "director" in the home chat.
 	author := "em"
 	for ev := range sess.Events() {
 		switch ev.Kind {
@@ -234,8 +234,8 @@ func (o *Orch) writeEMMCPConfig(p store.Project) (string, error) {
 		return "", err
 	}
 	args := []string{"mcp-em", "--project", p.ID}
-	if o.isConferenceRoom(p) {
-		args = append(args, "--pm")
+	if o.isDirectorRoom(p) {
+		args = append(args, "--director")
 	}
 	cfg := map[string]any{
 		"mcpServers": map[string]any{

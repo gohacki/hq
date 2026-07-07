@@ -11,6 +11,7 @@ import (
 	"github.com/gohacki/hq/internal/config"
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/rpc"
+	"github.com/gohacki/hq/internal/store"
 )
 
 // runChatHeader is the tiny process that lives in the header pane hq splits
@@ -66,15 +67,15 @@ func renderChatHeader(cl *rpc.Client, projectID, ticketID string) string {
 
 	var lines []string
 	switch {
-	case p.Name == "conference-room":
-		lines = append(lines, chHeaderStyle.Render("◆ hq · intake EM"))
+	case p.Name == store.DirectorRoomName:
+		lines = append(lines, chHeaderStyle.Render("◆ hq · director"))
 	case ticketID == "":
 		lines = append(lines, chHeaderStyle.Render("◉ EM · "+p.Name))
 	default:
 		lines = append(lines, chHeaderStyle.Render("⚙ Engineer · "+p.Name))
 	}
 
-	if p.Name != "conference-room" && ticketID == "" {
+	if p.Name != store.DirectorRoomName && ticketID == "" {
 		repos := make([]string, len(p.Repos))
 		for i, r := range p.Repos {
 			repos[i] = r.Name

@@ -11,7 +11,7 @@ const helpBody = `  HQ HELP                                      (any key closes
 
   THE COMPANY
     hq runs an engineering department for you (the boss). ◆ hq in the
-    sidebar is the intake EM: it creates projects and answers cross-project
+    sidebar is the director: it creates projects and answers cross-project
     questions. Each project has its own EM you brief; engineers work
     tickets (build = ship a change, spike = investigate). Anything that
     needs you lands in ⚠ NEEDS YOU at the top of the sidebar.

@@ -62,8 +62,8 @@ func (m *model) execCommand(line string) (tea.Model, tea.Cmd) {
 	case "board", "home":
 		m.focus = focusMain
 		return m, m.gotoBoard("")
-	case "hq", "intake":
-		if cr := m.conferenceRoomID(); cr != "" {
+	case "hq", "director":
+		if cr := m.directorRoomID(); cr != "" {
 			return m, m.openChat(cr, "")
 		}
 		return m, nil
@@ -241,7 +241,7 @@ func sideText(it sideItem) string {
 	case rowAll:
 		return "all projects board"
 	case rowHome:
-		return "hq intake"
+		return "hq director"
 	case rowProject:
 		return it.project.Name
 	case rowEM:

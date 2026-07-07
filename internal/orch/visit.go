@@ -27,7 +27,7 @@ func fileExists(p string) bool {
 	return err == nil
 }
 
-// checkoutEM hands the project's EM (or PM) session over for interactive use.
+// checkoutEM hands the project's EM (or director) session over for interactive use.
 // The headless process (if warm) is dropped first; the next project message
 // resumes it headlessly as usual once the human checks back in.
 func (o *Orch) checkoutEM(projectID string) (Checkout, error) {

@@ -215,7 +215,7 @@ func (m *model) boardCols() []boardCol {
 	}
 	cutoff := time.Now().Add(-48 * time.Hour).Unix()
 	for i, t := range m.all {
-		if t.Project == "conference-room" {
+		if t.Project == store.DirectorRoomName {
 			continue
 		}
 		if m.boardProject != "" && t.ProjectID != m.boardProject {
@@ -280,8 +280,8 @@ func (m *model) boardContent() string {
 
   No tickets here yet.
 
-  Talk to your team: ◆ hq in the sidebar creates projects; a project's
-  EM plans and opens tickets. The board fills in as they work.`
+  Talk to your team: the ◆ hq director in the sidebar creates projects;
+  a project's EM plans and opens tickets. The board fills in as they work.`
 		board = lipgloss.JoinVertical(lipgloss.Left, board, styleDim.Render(hint))
 	}
 	return board
@@ -305,8 +305,13 @@ func authorStyle(author string) (string, lipgloss.Style) {
 func (m *model) chatContent() string {
 	var b strings.Builder
 	timeline := m.openTicket != "" && !m.expandChat
+	director := m.openProject != "" && m.openProject == m.directorRoomID()
 	for _, msg := range m.messages {
 		name, st := authorStyle(msg.Author)
+		if director && name == "EM" {
+			// Same "em" author tag everywhere; the home room's EM is the director.
+			name = "director"
+		}
 		ts := time.Unix(msg.CreatedAt, 0).Format("15:04")
 		body := msg.Body
 
@@ -406,8 +411,8 @@ func (m *model) headerView() string {
 	case screenChat:
 		for _, p := range m.projects {
 			if p.ID == m.openProject {
-				if p.Name == "conference-room" {
-					name = "◆ hq — intake · new projects, cross-project questions"
+				if p.Name == store.DirectorRoomName {
+					name = "◆ hq — director · new projects, cross-project questions"
 				} else {
 					name = "# " + p.Name
 					repos := make([]string, len(p.Repos))

@@ -143,6 +143,11 @@ type Project struct {
 	CreatedAt    int64
 }
 
+// DirectorRoomName is the built-in project where the Director lives:
+// project intake, cross-project questions. Formerly "conference-room";
+// the daemon migrates legacy rows at boot.
+const DirectorRoomName = "director"
+
 const projectCols = `id, name, delivery, verify, em_model, eng_model, handbook_path, em_session_id, created_at`
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
@@ -158,6 +163,13 @@ func (s *Store) CreateProject(p Project) error {
 	}
 	_, err := s.db.Exec(`INSERT INTO projects (`+projectCols+`) VALUES (?,?,?,?,?,?,?,?,?)`,
 		p.ID, p.Name, p.Delivery, p.Verify, p.EMModel, p.EngModel, p.HandbookPath, p.EMSessionID, p.CreatedAt)
+	return err
+}
+
+// RenameProject updates a project's name and handbook path in place (used
+// by the conference-room → director boot migration).
+func (s *Store) RenameProject(id, name, handbookPath string) error {
+	_, err := s.db.Exec(`UPDATE projects SET name=?, handbook_path=? WHERE id=?`, name, handbookPath, id)
 	return err
 }
 
@@ -373,7 +385,7 @@ func (s *Store) TicketsForProject(projectID string) ([]Ticket, error) {
 	return s.queryTickets(`SELECT `+ticketCols+` FROM tickets WHERE project_id = ? ORDER BY created_at DESC`, projectID)
 }
 
-// AllTickets returns every ticket (PM cross-project view, board).
+// AllTickets returns every ticket (director cross-project view, board).
 func (s *Store) AllTickets() ([]Ticket, error) {
 	return s.queryTickets(`SELECT ` + ticketCols + ` FROM tickets ORDER BY updated_at DESC`)
 }

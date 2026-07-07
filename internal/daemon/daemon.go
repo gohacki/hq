@@ -21,7 +21,7 @@ import (
 // reach agents. The daemon core stays deterministic and testable behind it.
 type Orchestrator interface {
 	// BossProjectMessage handles a boss message in a project's main scroll
-	// (routes to the project's EM, or the PM in the conference room).
+	// (routes to the project's EM, or the director in the director room).
 	BossProjectMessage(ctx context.Context, p store.Project, body string)
 	// BossTicketMessage handles a boss reply inside a ticket thread (steers
 	// the engineer).
@@ -57,7 +57,7 @@ func (d *Daemon) Run(ctx context.Context) error {
 		return err
 	}
 	defer os.Remove(d.Paths.PIDPath())
-	if err := d.ensureConferenceRoom(); err != nil {
+	if err := d.ensureDirectorRoom(); err != nil {
 		return err
 	}
 	if d.Orch != nil {
@@ -71,24 +71,40 @@ func (d *Daemon) Run(ctx context.Context) error {
 	return d.Server.Serve(ctx)
 }
 
-// ConferenceRoomName is the built-in project where the PM lives: project
-// intake, cross-project questions.
-const ConferenceRoomName = "conference-room"
+// legacyDirectorRoomName is the pre-rename name of the director's project;
+// ensureDirectorRoom migrates it at boot.
+const legacyDirectorRoomName = "conference-room"
 
-func (d *Daemon) ensureConferenceRoom() error {
-	_, err := d.Store.ProjectByName(ConferenceRoomName)
+// ensureDirectorRoom guarantees the built-in director project exists,
+// migrating a legacy "conference-room" row (and its data dir) in place so
+// history, session id, and handbook survive the rename.
+func (d *Daemon) ensureDirectorRoom() error {
+	_, err := d.Store.ProjectByName(store.DirectorRoomName)
 	if err == nil {
 		return nil
 	}
 	if err != store.ErrNotFound {
 		return err
 	}
-	_, err = d.CreateProject(ConferenceRoomName, nil, "local-only", "none")
+	if p, err := d.Store.ProjectByName(legacyDirectorRoomName); err == nil {
+		oldDir, newDir := d.Paths.ProjectDir(p.Name), d.Paths.ProjectDir(store.DirectorRoomName)
+		if _, statErr := os.Stat(oldDir); statErr == nil {
+			if err := os.Rename(oldDir, newDir); err != nil {
+				return err
+			}
+		} else if err := os.MkdirAll(newDir, 0o755); err != nil {
+			return err
+		}
+		return d.Store.RenameProject(p.ID, store.DirectorRoomName, filepath.Join(newDir, "handbook.md"))
+	} else if err != store.ErrNotFound {
+		return err
+	}
+	_, err = d.CreateProject(store.DirectorRoomName, nil, "local-only", "none")
 	return err
 }
 
 // PostMessage appends a message and publishes it to subscribers. It is the
-// single choke point every message (boss, pm, em, eng, system) goes through.
+// single choke point every message (boss, em, eng, system) goes through.
 func (d *Daemon) PostMessage(m store.Message) (store.Message, error) {
 	id, err := d.Store.AppendMessage(m)
 	if err != nil {
@@ -332,7 +348,7 @@ func (d *Daemon) registerHandlers() {
 
 	d.Server.Handle("tickets.list", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		p, err := unmarshal[struct {
-			ProjectID string `json:"project_id"` // "" = all projects (board / PM)
+			ProjectID string `json:"project_id"` // "" = all projects (board / director)
 		}](raw)
 		if err != nil {
 			return nil, err

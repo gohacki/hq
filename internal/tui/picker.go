@@ -15,6 +15,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/gohacki/hq/internal/store"
 )
 
 type pickerItem struct {
@@ -76,7 +78,7 @@ func (m *model) findProject(id string) (p struct {
 	for _, pr := range m.projects {
 		if pr.ID == id {
 			p.Name, p.EMModel, p.EMSessionID = pr.Name, pr.EMModel, pr.EMSessionID
-			if pr.Name == "conference-room" {
+			if pr.Name == store.DirectorRoomName {
 				p.Name = "hq"
 			}
 		}

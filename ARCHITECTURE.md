@@ -14,7 +14,7 @@ client rendering My Office, the board, and project chats from RPC + events.
                                                    spawns/owns    │ stdio
                                             ┌─────────────────────┼─────────────┐
                                             ▼                     ▼             ▼
-                                     PM / EMs (per         engineers (per   treehouse /
+                              director / EMs (per        engineers (per   treehouse /
                                      project, on-demand,   ticket, headless no-mistakes /
                                      headless claude)      claude in        tmux (CLIs)
                                                            worktree)
@@ -29,7 +29,7 @@ internal/store/       SQLite: projects, repos, tickets, messages, reads, items, 
 internal/rpc/         JSON-RPC over unix socket: requests + server-push events
 internal/daemon/      daemon core: lifecycle, project creation, items engine, presence
 internal/agent/       Harness interface; claude/ adapter (stream-json, resume, models)
-internal/orch/        judgment layer: PM/EM lifecycle (orch.go), engineers (eng.go),
+internal/orch/        judgment layer: director/EM lifecycle (orch.go), engineers (eng.go),
                       plans/ask_boss/handbook (plans.go), prompts.go, mcpcmd.go,
                       onboarding.go, visit.go, teardown.go
 internal/mcp/         minimal MCP stdio server (initialize, tools/list, tools/call)
@@ -65,16 +65,16 @@ notification gating against the presence setting; the queue is durable.
 
 `agent.Harness`/`Session` unchanged from v1: headless
 `claude -p --input-format stream-json --output-format stream-json`,
-`--append-system-prompt` for PM/EM roles, `--resume` for durable memory and
+`--append-system-prompt` for director/EM roles, `--resume` for durable memory and
 desk visits, `--model` per spec (default sonnet; `fable`→`claude-fable-5`).
 All agents run `--dangerously-skip-permissions`: engineers are isolated in
-worktrees; the PM/EM delegate-don't-do rule is prompt-enforced.
+worktrees; the director/EM delegate-don't-do rule is prompt-enforced.
 
 ## Orchestration
 
-- **PM/EM**: same lifecycle (on-demand, 15-min idle reap, resume-on-wake).
-  The PM is the Conference Room's EM with a different prompt + extra tools.
-  MCP config points at `hq mcp-em --project <id> [--pm]`, whose tools call
+- **Director/EM**: same lifecycle (on-demand, 15-min idle reap, resume-on-wake).
+  The director is the home room's EM with a different prompt + extra tools.
+  MCP config points at `hq mcp-em --project <id> [--director]`, whose tools call
   back into the daemon over the socket.
 - **Engineers**: spawn = ticket row → treehouse lease (fetches origin;
   fail-closed) → brief file → headless session. Supervision classifies
@@ -117,7 +117,7 @@ hq to be running inside tmux; outside tmux everything but attach works.
 ## Testing
 
 - store: schema round-trips, items lifecycle, plans, settings.
-- daemon e2e: real socket — boot, conference room, project create,
+- daemon e2e: real socket — boot, director room, project create,
   messages/events, items file→auto-resolve, presence validation.
 - orch: marker classification, proposed-ticket parsing, teardown safety
   (unlandedWork against real git repos).

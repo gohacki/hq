@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log/slog"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -69,13 +70,13 @@ func TestDaemonEndToEnd(t *testing.T) {
 		t.Fatalf("ping: %v %q", err, pong)
 	}
 
-	// conference room exists at boot
+	// director room exists at boot
 	var prjs []ProjectView
 	if err := cl.Call("projects.list", nil, &prjs); err != nil {
 		t.Fatal(err)
 	}
-	if len(prjs) != 1 || prjs[0].Name != ConferenceRoomName {
-		t.Fatalf("want [conference-room], got %+v", prjs)
+	if len(prjs) != 1 || prjs[0].Name != store.DirectorRoomName {
+		t.Fatalf("want [director], got %+v", prjs)
 	}
 
 	// create a project spanning a real git repo
@@ -191,5 +192,67 @@ func TestDaemonEndToEnd(t *testing.T) {
 	}
 	if err := cl.Call("presence.set", map[string]any{"mode": "napping"}, nil); err == nil {
 		t.Fatal("want invalid-mode error")
+	}
+}
+
+func TestDirectorRoomMigration(t *testing.T) {
+	dir := t.TempDir()
+	paths := config.Paths{ConfigDir: filepath.Join(dir, "cfg"), DataDir: filepath.Join(dir, "data")}
+	if err := paths.Ensure(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(paths.DBPath())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	d := New(paths, st, slog.New(slog.DiscardHandler))
+
+	// A pre-rename daemon left a conference-room row with history and a data dir.
+	oldDir := paths.ProjectDir(legacyDirectorRoomName)
+	if err := os.MkdirAll(oldDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oldDir, "handbook.md"), []byte("legacy handbook"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.CreateProject(store.Project{
+		ID: "p-legacy", Name: legacyDirectorRoomName, Delivery: "local-only", Verify: "none",
+		HandbookPath: filepath.Join(oldDir, "handbook.md"), EMSessionID: "sess-keep",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.ensureDirectorRoom(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := st.ProjectByName(store.DirectorRoomName)
+	if err != nil {
+		t.Fatalf("director project missing after migration: %v", err)
+	}
+	if p.ID != "p-legacy" || p.EMSessionID != "sess-keep" {
+		t.Fatalf("migration must keep the same row (id, session), got %+v", p)
+	}
+	wantHandbook := filepath.Join(paths.ProjectDir(store.DirectorRoomName), "handbook.md")
+	if p.HandbookPath != wantHandbook {
+		t.Fatalf("handbook path not migrated: %q", p.HandbookPath)
+	}
+	if b, err := os.ReadFile(wantHandbook); err != nil || string(b) != "legacy handbook" {
+		t.Fatalf("handbook content lost: %v %q", err, b)
+	}
+	if _, err := os.Stat(oldDir); !os.IsNotExist(err) {
+		t.Fatalf("legacy dir should be gone: %v", err)
+	}
+	if _, err := st.ProjectByName(legacyDirectorRoomName); err != store.ErrNotFound {
+		t.Fatalf("legacy row should be renamed away, got %v", err)
+	}
+
+	// Idempotent: a second boot leaves the single migrated row alone.
+	if err := d.ensureDirectorRoom(); err != nil {
+		t.Fatal(err)
+	}
+	prjs, err := st.Projects()
+	if err != nil || len(prjs) != 1 {
+		t.Fatalf("want exactly one project after re-run, got %d (%v)", len(prjs), err)
 	}
 }

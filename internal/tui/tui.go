@@ -224,19 +224,19 @@ func (m *model) refresh() tea.Cmd {
 }
 
 // hasProjects reports whether the boss has briefed anything beyond the
-// built-in conference room yet.
+// built-in director room yet.
 func (m *model) hasProjects() bool {
 	for _, p := range m.projects {
-		if p.Name != "conference-room" {
+		if p.Name != store.DirectorRoomName {
 			return true
 		}
 	}
 	return false
 }
 
-func (m *model) conferenceRoomID() string {
+func (m *model) directorRoomID() string {
 	for _, p := range m.projects {
-		if p.Name == "conference-room" {
+		if p.Name == store.DirectorRoomName {
 			return p.ID
 		}
 	}
@@ -318,7 +318,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if len(m.items) == 0 && !m.hasProjects() {
 				// Nothing needs you and there's no project yet to brief —
 				// land straight in the hq home chat instead of an empty board.
-				if cr := m.conferenceRoomID(); cr != "" {
+				if cr := m.directorRoomID(); cr != "" {
 					return m, tea.Batch(m.openChat(cr, ""), m.markRead())
 				}
 			}

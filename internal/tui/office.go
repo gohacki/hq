@@ -222,7 +222,7 @@ func age(created int64) string {
 func (m *model) projectName(id string) string {
 	for _, p := range m.projects {
 		if p.ID == id {
-			if p.Name == "conference-room" {
+			if p.Name == store.DirectorRoomName {
 				return "hq"
 			}
 			return p.Name

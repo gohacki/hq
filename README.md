@@ -2,7 +2,7 @@
 
 **An engineering department as a program.**
 
-hq runs a department of AI agents for you: an **intake EM** in the ◆ hq
+hq runs a department of AI agents for you: a **director** in the ◆ hq
 home chat that creates projects, an **EM** per project that plans and
 delegates, and **engineers** that work tickets autonomously in isolated git
 worktrees ([treehouse](https://github.com/kunchenguid/treehouse)),
@@ -25,7 +25,7 @@ steps. The whole TUI is vim-native (h/l/j/k, gg/G, `/` search, `:` cmds).
 hq            # from anywhere, inside tmux — opens the TUI, auto-starts the daemon
 ```
 
-In the ◆ hq chat, tell the intake EM:
+In the ◆ hq chat, tell the director:
 
 > new project beta-os with repos ~/code/beta-os-api and ~/code/beta-os-web
 

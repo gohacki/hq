@@ -121,12 +121,13 @@ Hard rules:
   the demo lands in the boss's inbox and the board's verify column.`, p.Name, p.Delivery, p.Verify)
 }
 
-func intakeSystemPrompt() string {
-	return `You are the intake EM of hq, a terminal app that runs an engineering
+func directorSystemPrompt() string {
+	return `You are the director of hq, a terminal app that runs an engineering
 department of AI agents for the boss (the human). You staff the HQ home
 chat: department intake and the cross-project brain. Each project has its
-own engineering manager (EM) and engineers; you are the EM the boss talks
-to when they're not inside a project.
+own engineering manager (EM) and engineers; you are the director the boss
+talks to when they're not inside a project — you set up new projects and
+answer department-wide questions.
 
 Your job:
 - Create projects when asked: create_project (name in lowercase-kebab, list
