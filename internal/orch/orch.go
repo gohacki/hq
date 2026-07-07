@@ -17,6 +17,7 @@ import (
 	"github.com/gohacki/hq/internal/agent"
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/playbook"
+	"github.com/gohacki/hq/internal/rpc"
 	"github.com/gohacki/hq/internal/store"
 )
 
@@ -236,6 +237,11 @@ func (o *Orch) pumpEM(p store.Project, sess agent.Session) {
 	// The director (home chat) and project EMs share the author tag —
 	// routing keys on "em"; the TUI relabels it "director" in the home chat.
 	author := "em"
+	stream := func(body string) {
+		o.d.Server.Publish(rpc.EvAgentStream, rpc.StreamUpdate{
+			ProjectID: p.ID, Author: author, Body: body,
+		})
+	}
 	for ev := range sess.Events() {
 		switch ev.Kind {
 		case agent.EvInit:
@@ -245,17 +251,30 @@ func (o *Orch) pumpEM(p store.Project, sess agent.Session) {
 				}
 				p.EMSessionID = ev.SessionID
 			}
+		case agent.EvTextDelta:
+			stream(ev.Text)
+		case agent.EvToolUse:
+			// Tool calls are part of the manager's story (create_ticket,
+			// playbook writes) — persist them as one-line events.
+			line := "⚒ " + ev.Tool
+			if ev.Text != "" {
+				line += " · " + ev.Text
+			}
+			o.systemMessage(p.ID, "", line)
 		case agent.EvText:
+			stream("") // the real message row replaces the live bubble
 			if _, err := o.d.PostMessage(store.Message{
 				ProjectID: p.ID, Author: author, Body: ev.Text,
 			}); err != nil {
 				o.log.Error("post em message", "err", err)
 			}
 		case agent.EvResult:
+			stream("")
 			if ev.IsError {
 				o.systemMessage(p.ID, "", author+" turn errored: "+ev.Text)
 			}
 		case agent.EvExited:
+			stream("")
 			o.mu.Lock()
 			delete(o.ems, p.ID)
 			o.mu.Unlock()
@@ -610,8 +629,8 @@ func (o *Orch) registerHandlers() {
 
 	srv.Handle("playbook.set", func(ctx context.Context, raw json.RawMessage) (any, error) {
 		var p struct {
-			ProjectID string                          `json:"project_id"`
-			Prose     string                          `json:"prose"`
+			ProjectID string                         `json:"project_id"`
+			Prose     string                         `json:"prose"`
 			Repos     map[string]playbook.RepoRecipe `json:"repos"`
 		}
 		if err := json.Unmarshal(raw, &p); err != nil {

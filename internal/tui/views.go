@@ -340,7 +340,22 @@ func (m *model) chatContent() string {
 		}
 		b.WriteString(body + "\n\n")
 	}
-	if len(m.messages) == 0 {
+	// Live activity: the agent's in-progress turn — streaming text renders
+	// as a typing bubble, tool calls as a working line. Ephemeral; the real
+	// message row replaces it.
+	if m.stream.Body != "" {
+		name, st := authorStyle(m.stream.Author)
+		if director && name == "EM" {
+			name = "director"
+		}
+		if strings.HasPrefix(m.stream.Body, "⚒") {
+			b.WriteString(styleDim.Render("· "+name+" ") + styleAuthSys.Render(truncate(strings.ReplaceAll(m.stream.Body, "\n", " "), m.mainWidth-12)) + styleDim.Render(" …") + "\n")
+		} else {
+			b.WriteString(st.Render(name) + " " + styleDim.Render("typing…") + "\n")
+			b.WriteString(lipgloss.NewStyle().Width(m.mainWidth-2).Render(m.stream.Body+" ▌") + "\n\n")
+		}
+	}
+	if len(m.messages) == 0 && m.stream.Body == "" {
 		b.WriteString(styleAuthSys.Render("no messages yet — say something below"))
 	}
 	return b.String()

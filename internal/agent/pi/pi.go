@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 
@@ -158,6 +159,7 @@ type session struct {
 	sessionID string
 	lastText  string // last assistant message text; agent_end's EvResult carries it
 	lastErr   string // provider error from an errored assistant message, if any
+	partial   string // accumulating text of the currently streaming message
 	closed    bool   // Close() called — an exit afterwards is expected, not an error
 }
 
@@ -239,8 +241,48 @@ type frame struct {
 	} `json:"data"`
 	Message    *piMessage `json:"message"`
 	FinalError string     `json:"finalError"`
+	// message_update streaming payload
+	AssistantMessageEvent struct {
+		Type  string `json:"type"`
+		Delta string `json:"delta"`
+	} `json:"assistantMessageEvent"`
+	// tool_execution_* payload
+	ToolName string          `json:"toolName"`
+	Args     json.RawMessage `json:"args"`
+	IsError  bool            `json:"isError"`
 	// extension UI dialogs need an answer or the extension hangs
 	Method string `json:"method"`
+}
+
+// argsSummary flattens a tool's args into one short human line ("command:
+// hq em --project … list") for the chat's activity display.
+func argsSummary(raw json.RawMessage) string {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil || len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		s := strings.ReplaceAll(strings.TrimSpace(strings.Trim(strings.TrimPrefix(string(mustJSON(v)), "\""), "\"")), "\n", " ")
+		if len(s) > 120 {
+			s = s[:120] + "…"
+		}
+		parts = append(parts, k+": "+s)
+	}
+	sort.Strings(parts)
+	out := strings.Join(parts, " · ")
+	if len(out) > 240 {
+		out = out[:240] + "…"
+	}
+	return out
+}
+
+func mustJSON(v any) []byte {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	return b
 }
 
 type piMessage struct {
@@ -294,7 +336,25 @@ func (s *session) readLoop(stdout io.Reader) {
 			} else if f.Success != nil && !*f.Success {
 				s.events <- agent.Event{Kind: agent.EvResult, IsError: true, Text: f.Command + ": " + f.Error}
 			}
+		case "message_update":
+			// Streaming text: accumulate deltas ourselves and re-emit the
+			// text-so-far. The channel is bounded — drop deltas rather than
+			// stall pi's stdout when the consumer is slow; message_end
+			// carries the authoritative full text anyway.
+			if f.AssistantMessageEvent.Type == "text_delta" && f.AssistantMessageEvent.Delta != "" {
+				s.mu.Lock()
+				s.partial += f.AssistantMessageEvent.Delta
+				partial := s.partial
+				s.mu.Unlock()
+				select {
+				case s.events <- agent.Event{Kind: agent.EvTextDelta, Text: partial}:
+				default:
+				}
+			}
 		case "message_end":
+			s.mu.Lock()
+			s.partial = ""
+			s.mu.Unlock()
 			if f.Message != nil && f.Message.Role == "assistant" {
 				if f.Message.StopReason == "error" || f.Message.ErrorMessage != "" {
 					s.mu.Lock()
@@ -309,6 +369,12 @@ func (s *session) readLoop(stdout io.Reader) {
 					s.mu.Unlock()
 					s.events <- agent.Event{Kind: agent.EvText, Text: txt}
 				}
+			}
+		case "tool_execution_start":
+			s.events <- agent.Event{Kind: agent.EvToolUse, Tool: f.ToolName, Text: argsSummary(f.Args)}
+		case "tool_execution_end":
+			if f.IsError {
+				s.events <- agent.Event{Kind: agent.EvToolUse, Tool: f.ToolName, Text: "failed", IsError: true}
 			}
 		case "agent_end":
 			s.mu.Lock()

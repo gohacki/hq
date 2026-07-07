@@ -10,6 +10,7 @@ import (
 
 	"github.com/gohacki/hq/internal/agent"
 	"github.com/gohacki/hq/internal/playbook"
+	"github.com/gohacki/hq/internal/rpc"
 	"github.com/gohacki/hq/internal/store"
 	"github.com/gohacki/hq/internal/worktree"
 )
@@ -339,6 +340,11 @@ func (o *Orch) superviseEng(t store.Ticket, sess agent.Session) {
 		}
 	}
 
+	stream := func(body string) {
+		o.d.Server.Publish(rpc.EvAgentStream, rpc.StreamUpdate{
+			ProjectID: t.ProjectID, TicketID: t.ID, Author: "eng:" + t.ID, Body: body,
+		})
+	}
 	for ev := range sess.Events() {
 		switch ev.Kind {
 		case agent.EvInit:
@@ -349,15 +355,28 @@ func (o *Orch) superviseEng(t store.Ticket, sess agent.Session) {
 					o.log.Error("persist eng session", "err", err)
 				}
 			}
+		case agent.EvTextDelta:
+			stream(ev.Text)
+		case agent.EvToolUse:
+			// Engineers make hundreds of tool calls — show them as live
+			// activity, never as persisted rows.
+			line := "⚒ " + ev.Tool
+			if ev.Text != "" {
+				line += " · " + ev.Text
+			}
+			stream(line)
 		case agent.EvText:
+			stream("")
 			post("text", ev.Text)
 		case agent.EvResult:
+			stream("")
 			refresh()
 			if t.Status.Terminal() || t.Status == store.TicketVisiting {
 				continue
 			}
 			o.classifyTurnEnd(&t, ev, post)
 		case agent.EvExited:
+			stream("")
 			o.mu.Lock()
 			delete(o.engs, t.ID)
 			o.mu.Unlock()

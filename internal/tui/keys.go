@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/gohacki/hq/internal/daemon"
+	"github.com/gohacki/hq/internal/rpc"
 	"github.com/gohacki/hq/internal/store"
 )
 
@@ -546,6 +547,7 @@ func (m *model) openChat(projectID, ticketID string) tea.Cmd {
 	m.openProject = projectID
 	m.openTicket = ticketID
 	m.expandChat = false
+	m.stream = rpc.StreamUpdate{}
 	m.focus = focusComposer
 	return tea.Batch(m.refresh(), m.composer.Focus())
 }

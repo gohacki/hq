@@ -21,11 +21,12 @@ type Spec struct {
 type EventKind string
 
 const (
-	EvInit    EventKind = "init"     // session started; SessionID set
-	EvText    EventKind = "text"     // assistant text block
-	EvToolUse EventKind = "tool_use" // assistant used a tool (name in Tool)
-	EvResult  EventKind = "result"   // turn finished; Text = final result
-	EvExited  EventKind = "exited"   // process ended; Err set on failure
+	EvInit      EventKind = "init"       // session started; SessionID set
+	EvText      EventKind = "text"       // assistant text block (complete)
+	EvTextDelta EventKind = "text_delta" // streaming: Text = message text so far
+	EvToolUse   EventKind = "tool_use"   // assistant used a tool (name in Tool)
+	EvResult    EventKind = "result"     // turn finished; Text = final result
+	EvExited    EventKind = "exited"     // process ended; Err set on failure
 )
 
 type Event struct {

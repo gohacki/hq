@@ -32,4 +32,16 @@ const (
 	EvProjectCreated = "project.created" // data: store.Project
 	EvItemNew        = "item.new"        // data: store.Item — something needs the boss
 	EvItemResolved   = "item.resolved"   // data: store.Item
+	EvAgentStream    = "agent.stream"    // data: StreamUpdate — ephemeral, never persisted
 )
+
+// StreamUpdate is a live in-progress view of an agent's current turn: the
+// accumulating assistant text as it streams, or a one-line tool-activity
+// note. Ephemeral — the TUI paints it under the thread and drops it when
+// the real message row lands (or Body is empty).
+type StreamUpdate struct {
+	ProjectID string `json:"project_id"`
+	TicketID  string `json:"ticket_id"` // "" = the project/director chat
+	Author    string `json:"author"`    // em | eng:<ticket>
+	Body      string `json:"body"`      // text so far; "" clears the bubble
+}

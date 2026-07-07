@@ -125,6 +125,10 @@ type model struct {
 	side       []sideItem
 	sideCursor int
 
+	// live agent activity: the in-progress turn (streaming text or a tool
+	// line) for the open chat. Ephemeral — replaced by the real message row.
+	stream rpc.StreamUpdate
+
 	// board scope
 	boardProject string // project id ("" = all projects)
 
@@ -423,10 +427,25 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *model) handleDaemonEvent(ev rpc.Event) (tea.Model, tea.Cmd) {
 	switch ev.Event {
+	case rpc.EvAgentStream:
+		// Local repaint only — streaming arrives at token rate and must
+		// never fan out into refresh RPCs.
+		var su rpc.StreamUpdate
+		if json.Unmarshal(ev.Data, &su) == nil && m.screen == screenChat &&
+			su.ProjectID == m.openProject && su.TicketID == m.openTicket {
+			atBottom := m.vp.AtBottom()
+			m.stream = su
+			m.renderMain()
+			if atBottom {
+				m.vp.GotoBottom()
+			}
+		}
+		return m, nil
 	case rpc.EvMessageNew:
 		var msg store.Message
 		if json.Unmarshal(ev.Data, &msg) == nil && m.screen == screenChat &&
 			msg.ProjectID == m.openProject && msg.TicketID == m.openTicket {
+			m.stream = rpc.StreamUpdate{} // the real row replaces the live bubble
 			m.messages = append(m.messages, msg)
 			m.renderMain()
 			m.vp.GotoBottom()

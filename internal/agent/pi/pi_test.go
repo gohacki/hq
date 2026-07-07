@@ -15,6 +15,10 @@ import (
 const stubPi = `#!/bin/sh
 echo '{"id":"hq-init","type":"response","command":"get_state","success":true,"data":{"sessionFile":"/tmp/sess-1.jsonl"}}'
 echo '{"type":"message_start","message":{"role":"assistant","content":[]}}'
+echo '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"hel"}}'
+echo '{"type":"message_update","message":{},"assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"lo"}}'
+echo '{"type":"tool_execution_start","toolCallId":"c1","toolName":"bash","args":{"command":"ls -la"}}'
+echo '{"type":"tool_execution_end","toolCallId":"c1","toolName":"bash","result":{},"isError":false}'
 echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","text":"mull"},{"type":"text","text":"hello"},{"type":"text","text":"world"}]}}'
 echo '{"type":"agent_end","messages":[]}'
 echo '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"400 no extra usage"}}'
@@ -51,6 +55,17 @@ func TestEventTranslation(t *testing.T) {
 	}
 	if sess.SessionID() != "/tmp/sess-1.jsonl" {
 		t.Fatalf("SessionID() = %q", sess.SessionID())
+	}
+	// streaming deltas accumulate into text-so-far
+	if ev := next(); ev.Kind != agent.EvTextDelta || ev.Text != "hel" {
+		t.Fatalf("want first delta, got %+v", ev)
+	}
+	if ev := next(); ev.Kind != agent.EvTextDelta || ev.Text != "hello" {
+		t.Fatalf("want accumulated delta, got %+v", ev)
+	}
+	// tool execution start becomes a tool event with a one-line args summary
+	if ev := next(); ev.Kind != agent.EvToolUse || ev.Tool != "bash" || ev.Text != "command: ls -la" {
+		t.Fatalf("want tool event, got %+v", ev)
 	}
 	// thinking blocks dropped, text blocks joined
 	if ev := next(); ev.Kind != agent.EvText || ev.Text != "hello\nworld" {
