@@ -43,9 +43,9 @@ func runChatHeader(paths config.Paths, args []string) error {
 }
 
 var (
-	chHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
-	chDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	chAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("110"))
+	chHeaderStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#e0def4"))
+	chDimStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#6e6a86"))
+	chAccentStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#9ccfd8"))
 )
 
 func renderChatHeader(cl *rpc.Client, projectID, ticketID string) string {

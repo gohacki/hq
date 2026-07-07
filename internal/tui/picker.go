@@ -125,9 +125,9 @@ func (m *model) pickerKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 var (
 	stylePickerBox = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("62")).Padding(1, 2)
-	stylePickerSel = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62"))
-	stylePickerDim = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
+			BorderForeground(rpIris).Padding(1, 2)
+	stylePickerSel = lipgloss.NewStyle().Bold(true).Foreground(rpText).Background(rpHighlight)
+	stylePickerDim = lipgloss.NewStyle().Foreground(rpMuted)
 )
 
 // pickerView renders the overlay, centered in the main area.

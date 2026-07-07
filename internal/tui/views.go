@@ -19,39 +19,56 @@ import (
 
 const sidebarWidth = 26
 
+// Rosé Pine Moon — matched to the user's terminal theme.
+// https://rosepinetheme.com/palette (moon variant)
+const (
+	rpBase      = lipgloss.Color("#232136")
+	rpOverlay   = lipgloss.Color("#393552")
+	rpMuted     = lipgloss.Color("#6e6a86")
+	rpSubtle    = lipgloss.Color("#908caa")
+	rpText      = lipgloss.Color("#e0def4")
+	rpLove      = lipgloss.Color("#eb6f92")
+	rpGold      = lipgloss.Color("#f6c177")
+	rpRose      = lipgloss.Color("#ea9a97")
+	rpPine      = lipgloss.Color("#3e8fb0")
+	rpFoam      = lipgloss.Color("#9ccfd8")
+	rpIris      = lipgloss.Color("#c4a7e7")
+	rpHighlight = lipgloss.Color("#44415a") // highlight med — borders, selections
+)
+
 var (
 	styleSidebar = lipgloss.NewStyle().Width(sidebarWidth).Padding(0, 1).
 			Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("240"))
-	styleFrame      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240"))
-	styleSideHeader = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true)
-	styleSideSel    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("62"))
-	styleSideActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	styleSideChan   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	styleSideTask   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styleBadgeSoft  = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("172")).Padding(0, 1)
+			BorderForeground(rpHighlight)
+	styleFrame      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(rpHighlight)
+	styleSideHeader = lipgloss.NewStyle().Foreground(rpMuted).Bold(true)
+	styleSideSel    = lipgloss.NewStyle().Bold(true).Foreground(rpText).Background(rpHighlight)
+	styleSideActive = lipgloss.NewStyle().Bold(true).Foreground(rpFoam)
+	styleSideChan   = lipgloss.NewStyle().Foreground(rpText)
+	styleSideTask   = lipgloss.NewStyle().Foreground(rpSubtle)
+	styleBadgeSoft  = lipgloss.NewStyle().Foreground(rpBase).Background(rpGold).Padding(0, 1)
 	// styleBadgeQuiet marks sidebar unread counts: visible, never shouting.
-	styleBadgeQuiet = lipgloss.NewStyle().Foreground(lipgloss.Color("172"))
-	styleHeader     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Background(lipgloss.Color("236")).Padding(0, 1)
-	styleMeta       = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Background(lipgloss.Color("236")).Padding(0, 1)
-	styleStatus     = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Padding(0, 1)
-	styleAuthBoss   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("45"))
-	styleAuthEM     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("213"))
-	styleAuthEng    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("220"))
-	styleAuthSys    = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
-	styleTime       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	styleCard       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("240")).Padding(0, 1)
-	styleCardSel    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-	styleReport     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-	styleTierHdr    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203"))
-	styleTierHdr2   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("172"))
-	styleDim        = lipgloss.NewStyle().Foreground(lipgloss.Color("243"))
-	styleAccepted   = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
-	styleStruck     = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Strikethrough(true)
-	styleCol        = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
-	styleColSel     = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15")).Underline(true)
-	styleURL        = lipgloss.NewStyle().Foreground(lipgloss.Color("45")).Underline(true)
-	styleBanner     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("203")).Padding(0, 1)
+	styleBadgeQuiet = lipgloss.NewStyle().Foreground(rpGold)
+	styleHeader     = lipgloss.NewStyle().Bold(true).Foreground(rpText).Background(rpOverlay).Padding(0, 1)
+	styleMeta       = lipgloss.NewStyle().Foreground(rpSubtle).Background(rpOverlay).Padding(0, 1)
+	styleStatus     = lipgloss.NewStyle().Foreground(rpSubtle).Padding(0, 1)
+	styleAuthBoss   = lipgloss.NewStyle().Bold(true).Foreground(rpFoam)
+	styleAuthEM     = lipgloss.NewStyle().Bold(true).Foreground(rpIris)
+	styleAuthEng    = lipgloss.NewStyle().Bold(true).Foreground(rpGold)
+	styleAuthSys    = lipgloss.NewStyle().Foreground(rpMuted).Italic(true)
+	styleTime       = lipgloss.NewStyle().Foreground(rpMuted)
+	styleCard       = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(rpHighlight).Padding(0, 1)
+	styleCardSel    = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(rpIris).Padding(0, 1)
+	styleReport     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(rpIris).Padding(0, 1)
+	styleTierHdr    = lipgloss.NewStyle().Bold(true).Foreground(rpLove)
+	styleTierHdr2   = lipgloss.NewStyle().Bold(true).Foreground(rpGold)
+	styleDim        = lipgloss.NewStyle().Foreground(rpMuted)
+	styleAccepted   = lipgloss.NewStyle().Foreground(rpPine)
+	styleStruck     = lipgloss.NewStyle().Foreground(rpMuted).Strikethrough(true)
+	styleCol        = lipgloss.NewStyle().Bold(true).Foreground(rpFoam)
+	styleColSel     = lipgloss.NewStyle().Bold(true).Foreground(rpText).Underline(true)
+	styleURL        = lipgloss.NewStyle().Foreground(rpIris).Underline(true)
+	styleBanner     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(rpLove).Padding(0, 1)
 )
 
 // headerLines is how many rows the header block takes on the current screen:
@@ -211,6 +228,17 @@ func (m *model) mdRenderer(width int) *glamour.TermRenderer {
 	style.Document.Margin = &zero
 	style.Document.BlockPrefix = ""
 	style.Document.BlockSuffix = ""
+	// Rosé Pine Moon accents, matching the TUI palette.
+	iris, gold, subtle := "#c4a7e7", "#f6c177", "#908caa"
+	style.Heading.Color = &iris
+	style.H1.Color = &iris
+	style.H1.BackgroundColor = nil
+	style.Link.Color = &iris
+	style.LinkText.Color = &iris
+	style.Code.Color = &gold
+	style.Code.BackgroundColor = nil
+	style.BlockQuote.Color = &subtle
+	style.CodeBlock.Theme = "rose-pine-moon"
 	r, err := glamour.NewTermRenderer(glamour.WithStyles(style), glamour.WithWordWrap(width), glamour.WithEmoji())
 	if err != nil {
 		return nil
