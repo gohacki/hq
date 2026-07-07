@@ -63,6 +63,16 @@ func ResolveModel(m string) string {
 
 func (h *Harness) SupportsMCP() bool { return false }
 
+// modelPattern is the provider-qualified --model pattern: the bare model
+// name can exist in several providers at once (anthropic's native id vs a
+// proxy model's alias name), and pi would happily match the wrong one.
+func (h *Harness) modelPattern(model string) string {
+	if model == "" {
+		model = h.Model
+	}
+	return h.Provider + "/" + ResolveModel(model)
+}
+
 // InteractiveCommand opens pi's own TUI on the same session file — used by
 // desk visits (`v` attach).
 func (h *Harness) InteractiveCommand(sessionID, model string, extraArgs ...string) []string {
@@ -70,10 +80,7 @@ func (h *Harness) InteractiveCommand(sessionID, model string, extraArgs ...strin
 	if sessionID != "" {
 		cmd = append(cmd, "--session", sessionID)
 	}
-	if model == "" {
-		model = h.Model
-	}
-	cmd = append(cmd, "--model", ResolveModel(model))
+	cmd = append(cmd, "--model", h.modelPattern(model))
 	return append(cmd, extraArgs...)
 }
 
@@ -87,11 +94,7 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 		"--session-dir", h.SessionDir,
 		"--no-approve", // never trust project-local extensions from RPC: no one is at the dialog
 	}
-	model := spec.Model
-	if model == "" {
-		model = h.Model
-	}
-	args = append(args, "--model", ResolveModel(model))
+	args = append(args, "--model", h.modelPattern(spec.Model))
 	if spec.SystemPrompt != "" {
 		// Append, keeping pi's small default prompt underneath the role —
 		// same shape as claude's --append-system-prompt.
