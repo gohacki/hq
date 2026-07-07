@@ -192,6 +192,34 @@ type boardCol struct {
 
 var reHTTPURL = regexp.MustCompile(`https?://[^\s)>\]"'*]+`)
 
+// Agents are prompted to write plain text, but inline markdown still slips
+// through. Rather than show raw syntax, render the common cases: code
+// spans get a tint, bold gets bold, links collapse to "text (url)", and
+// leading #-headings become bold lines.
+var (
+	reMDCode    = regexp.MustCompile("`([^`\n]+)`")
+	reMDBold    = regexp.MustCompile(`\*\*([^*\n]+)\*\*`)
+	reMDLink    = regexp.MustCompile(`\[([^\]\n]+)\]\((https?://[^)\s]+)\)`)
+	reMDHeading = regexp.MustCompile(`(?m)^#{1,4} +(.+)$`)
+
+	styleInlineCode = lipgloss.NewStyle().Foreground(lipgloss.Color("178"))
+	styleMDBold     = lipgloss.NewStyle().Bold(true)
+)
+
+func renderInlineMD(s string) string {
+	s = reMDLink.ReplaceAllString(s, "$1 ($2)")
+	s = reMDCode.ReplaceAllStringFunc(s, func(m string) string {
+		return styleInlineCode.Render(reMDCode.FindStringSubmatch(m)[1])
+	})
+	s = reMDBold.ReplaceAllStringFunc(s, func(m string) string {
+		return styleMDBold.Render(reMDBold.FindStringSubmatch(m)[1])
+	})
+	s = reMDHeading.ReplaceAllStringFunc(s, func(m string) string {
+		return styleMDBold.Render(reMDHeading.FindStringSubmatch(m)[1])
+	})
+	return s
+}
+
 // demoURLs maps ticket id → the dev-server URL from its open demo item.
 func (m *model) demoURLs() map[string]string {
 	urls := map[string]string{}
@@ -334,6 +362,7 @@ func (m *model) chatContent() string {
 			continue
 		}
 		b.WriteString(st.Render(name) + " " + styleTime.Render(ts) + "\n")
+		body = renderInlineMD(body)
 		if msg.Kind == "report" {
 			body = styleReport.Width(m.mainWidth - 4).Render(body)
 		} else {
@@ -353,7 +382,7 @@ func (m *model) chatContent() string {
 			b.WriteString(styleDim.Render("· "+name+" ") + styleAuthSys.Render(truncate(strings.ReplaceAll(m.stream.Body, "\n", " "), m.mainWidth-12)) + styleDim.Render(" …") + "\n")
 		} else {
 			b.WriteString(st.Render(name) + " " + styleDim.Render("typing…") + "\n")
-			b.WriteString(lipgloss.NewStyle().Width(m.mainWidth-2).Render(m.stream.Body+" ▌") + "\n\n")
+			b.WriteString(lipgloss.NewStyle().Width(m.mainWidth-2).Render(renderInlineMD(m.stream.Body)+" ▌") + "\n\n")
 		}
 	}
 	if len(m.messages) == 0 && m.stream.Body == "" {
