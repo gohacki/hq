@@ -84,9 +84,9 @@ const helpBody = `  HQ HELP                                      (any key closes
             :model [em|eng] <m> · :presence [mode] · :handbook
 
   PRESENCE (M)
-    🟢 available: notified of interrupts + demos/handbook edits
-    🎧 heads-down: interrupts only
-    👀 review: everything
+    available: notified of interrupts + demos/handbook edits
+    heads-down: interrupts only
+    review: everything
     The inbox always holds all of it regardless of mode.
 
   MODELS
