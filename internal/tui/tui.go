@@ -363,7 +363,13 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			// Otherwise: the board, with the sidebar cursor on the first
-			// inbox item (rebuildSidebar puts the inbox on top).
+			// inbox item — the nav rows sit above it, so aim explicitly.
+			for i, it := range m.side {
+				if it.kind == rowItem {
+					m.sideCursor = i
+					break
+				}
+			}
 		}
 		m.renderMain()
 		return m, m.markRead()

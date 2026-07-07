@@ -120,9 +120,9 @@ fresh instead of dying silently.
 
 One Bubble Tea model with three screens (board/chat/plan) + help overlay
 and the attach picker. The board (kanban) is home, scoped by the sidebar's
-project rows. Sidebar sections: ⚠ needs-you inbox (open items, one-key
-a/r/d), projects (tickets nest under the focused one), staff (EM + live
-engineers). Vim layer in `internal/tui/vim.go`: gg/G, `/` search with n/N,
+project rows. Sidebar sections: global nav (all-projects board + ◆ hq director chat)
+pinned top, ⚠ needs-you inbox (open items, one-key a/r/d), projects
+(tickets nest under the focused one), staff (EM + live engineers). Vim layer in `internal/tui/vim.go`: gg/G, `/` search with n/N,
 `:` command line, h/l focus movement. Presence cycles with `M`;
 notifications are osascript desktop alerts gated by tier.
 

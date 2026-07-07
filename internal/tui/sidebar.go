@@ -11,15 +11,17 @@ import (
 	"github.com/gohacki/hq/internal/store"
 )
 
-// The sidebar is hq's constant left rail, in three stacked sections:
+// The sidebar is hq's constant left rail:
 //
+//	global nav    — the all-projects board and the ◆ hq director chat,
+//	                pinned at the very top: destinations, not projects
 //	⚠ needs you   — the inbox: every open attention item, interrupts first
-//	projects      — all-projects board, the hq home chat, each project
-//	                (tickets nest under the focused project)
+//	projects      — each project (tickets nest under the focused one)
 //	staff         — the focused project's EM and live engineers
 //
-// The kanban board is the home screen; the inbox is pinned on top because
-// "what needs me right now" is the first question the screen must answer.
+// The kanban board is the home screen; the inbox sits right under the two
+// nav rows because "what needs me right now" is the first question the
+// screen must answer.
 
 type rowKind int
 
@@ -88,6 +90,17 @@ func (m *model) openTicketCount(projectID string) int {
 func (m *model) rebuildSidebar() {
 	m.side = m.side[:0]
 
+	// Global nav first: the board and the director chat are destinations,
+	// not projects — they sit above the inbox and the project list.
+	var home daemon.ProjectView
+	for _, p := range m.projects {
+		if p.Name == store.DirectorRoomName {
+			home = p
+		}
+	}
+	m.side = append(m.side, sideItem{kind: rowAll})
+	m.side = append(m.side, sideItem{kind: rowHome, project: home})
+
 	if len(m.items) > 0 {
 		m.side = append(m.side, sideItem{kind: rowHeader, label: fmt.Sprintf("needs you (%d)", len(m.items))})
 		for i := range m.items {
@@ -95,22 +108,16 @@ func (m *model) rebuildSidebar() {
 		}
 	}
 
-	m.side = append(m.side, sideItem{kind: rowHeader, label: "projects"})
-	m.side = append(m.side, sideItem{kind: rowAll})
-
-	var home daemon.ProjectView
 	focused := m.focusedProjectID()
+	var open daemon.ProjectView
+	hasProjects := false
 	for _, p := range m.projects {
 		if p.Name == store.DirectorRoomName {
-			home = p
 			continue
 		}
-	}
-	m.side = append(m.side, sideItem{kind: rowHome, project: home})
-	var open daemon.ProjectView
-	for _, p := range m.projects {
-		if p.Name == store.DirectorRoomName {
-			continue
+		if !hasProjects {
+			hasProjects = true
+			m.side = append(m.side, sideItem{kind: rowHeader, label: "projects"})
 		}
 		if p.ID == focused {
 			open = p
