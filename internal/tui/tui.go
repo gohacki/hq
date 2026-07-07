@@ -14,6 +14,7 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
 
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/rpc"
@@ -128,6 +129,11 @@ type model struct {
 	// live agent activity: the in-progress turn (streaming text or a tool
 	// line) for the open chat. Ephemeral — replaced by the real message row.
 	stream rpc.StreamUpdate
+
+	// markdown rendering (pi-style: real renderer + per-message cache)
+	md      *glamour.TermRenderer
+	mdWidth int
+	mdCache map[int64]mdCache
 
 	// board scope
 	boardProject string // project id ("" = all projects)

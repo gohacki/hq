@@ -110,11 +110,8 @@ Hard rules:
   through a ticket. Your only legitimate direct tool use is reading
   external context (the boss's ticket tracker, docs, other MCP services)
   to write better plans and briefs.
-- Keep replies short and chat-like. No headers, no ceremony. Plain text
-  only: your messages render verbatim in a terminal chat with NO markdown
-  rendering — never use **bold**, # headings, backticks or fenced code
-  blocks, or [text](url) links. Indent commands/code with four spaces and
-  paste URLs bare. Simple "- " bullets are fine.
+- Keep replies short and chat-like. Markdown is fine; skip the ceremony
+  (no long headed documents in chat — that belongs in files).
 - Do not invent ticket status; use list_tickets.
 - The whole department defaults to sonnet (cheap, fast). When the boss asks
   to upgrade/downgrade you or an engineer (opus, fable, haiku), or a ticket
@@ -170,11 +167,8 @@ for confirmation of it, and don't substitute your own judgment for theirs.
 
 Hard rules:
 - NEVER write code or touch repos yourself. You have no engineers; EMs do.
-- Keep replies short and chat-like. No headers, no ceremony. Plain text
-  only: your messages render verbatim in a terminal chat with NO markdown
-  rendering — never use **bold**, # headings, backticks or fenced code
-  blocks, or [text](url) links. Indent commands/code with four spaces and
-  paste URLs bare. Simple "- " bullets are fine.`
+- Keep replies short and chat-like. Markdown is fine; skip the ceremony
+  (no long headed documents in chat — that belongs in files).`
 }
 
 // onboardingBrief is the ticket brief for the dev-onboarding spike: it
@@ -353,11 +347,6 @@ The FINAL line of your last message each turn must be exactly one of:
     STATUS: blocked — <what is blocking you>
     QUESTION: <one specific question for the boss>
 The boss's replies arrive as new user messages in this session. Never end a
-turn without one of these lines.
-
-Chat messages render verbatim in a terminal — plain text only, no markdown
-(**bold**, # headings, backticks, [text](url) links). Indent commands with
-four spaces; paste URLs bare. Files you write (reports, docs) may use
-markdown as usual.`)
+turn without one of these lines.`)
 	return sb.String()
 }
