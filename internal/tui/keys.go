@@ -126,7 +126,13 @@ func (m *model) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "b":
 		if m.screen != screenBoard {
 			m.focus = focusMain
-			return m, m.gotoBoard(m.boardProject)
+			// From a project chat, b means that project's board; the
+			// director chat and everywhere else fall back to the last scope.
+			scope := m.boardProject
+			if m.screen == screenChat && m.openProject != "" && m.openProject != m.directorRoomID() {
+				scope = m.openProject
+			}
+			return m, m.gotoBoard(scope)
 		}
 		return m, nil
 	case "M":

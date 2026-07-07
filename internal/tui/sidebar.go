@@ -30,7 +30,7 @@ const (
 	rowHeader
 	rowAll     // board, all projects
 	rowHome    // the hq home chat (director)
-	rowProject // enter = that project's board
+	rowProject // enter = that project's EM chat (b = its board)
 	rowTicket  // ticket thread nested under the focused project
 	rowEM      // staff: the focused project's manager
 	rowEng     // staff: a live engineer
@@ -73,18 +73,6 @@ func (m *model) isCurrentRow(it sideItem) bool {
 	default:
 		return false
 	}
-}
-
-// openTicketCount counts non-terminal tickets of a project (badge on the
-// project row) from the department-wide list.
-func (m *model) openTicketCount(projectID string) int {
-	n := 0
-	for _, t := range m.all {
-		if t.ProjectID == projectID && !t.Status.Terminal() {
-			n++
-		}
-	}
-	return n
 }
 
 func (m *model) rebuildSidebar() {
@@ -230,7 +218,9 @@ func (m *model) openSideCursor() (tea.Model, tea.Cmd) {
 	case rowHome:
 		return m, m.openChat(it.project.ID, "")
 	case rowProject:
-		return m, m.gotoBoard(it.project.ID)
+		// A project opens as a conversation with its EM; the scoped board
+		// stays one keystroke away (b).
+		return m, m.openChat(it.project.ID, "")
 	case rowTicket, rowEng:
 		return m, m.openChat(it.project.ID, it.ticket.ID)
 	case rowEM:
@@ -314,19 +304,18 @@ func (m *model) sidebarView(height int) string {
 		case rowHome:
 			badge := ""
 			if it.project.Unread > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(it.project.Unread))
+				badge = " " + styleBadgeQuiet.Render(fmt.Sprint(it.project.Unread))
 			}
 			line = styleSideChan.Render("◆ hq") + badge
 		case rowProject:
+			// Just the name and, quietly, its unread count. Ticket state
+			// lives on the board and in the nested ticket rows — a second
+			// number here was noise.
 			badge := ""
 			pad := 0
-			if n := m.openTicketCount(it.project.ID); n > 0 {
-				badge = " " + styleBadgeSoft.Render(fmt.Sprint(n))
-				pad = 3 + len(fmt.Sprint(n))
-			}
 			if it.project.Unread > 0 {
-				badge += " " + styleBadge.Render(fmt.Sprint(it.project.Unread))
-				pad += 3 + len(fmt.Sprint(it.project.Unread))
+				badge = " " + styleBadgeQuiet.Render(fmt.Sprint(it.project.Unread))
+				pad = 1 + len(fmt.Sprint(it.project.Unread))
 			}
 			line = styleSideChan.Render("# "+truncate(it.project.Name, sidebarWidth-4-pad)) + badge
 		case rowTicket:

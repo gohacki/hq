@@ -30,7 +30,8 @@ const helpBody = `  HQ HELP                                      (any key closes
 
   THE BOARD (home)
     Kanban of tickets: backlog · in progress · verify · needs you · done.
-    Scoped to one project (enter on its sidebar row) or all projects.
+    Scoped to one project (b from its chat) or all projects. Enter on a
+    sidebar project row opens its EM chat; b flips to that board.
     Verify cards carry the engineer's dev-server URL for manual checks.
     h/l/j/k move (h past the first column reaches the sidebar), 0/$ jump
     to the first/last column, gg/G to a column's top/bottom, enter opens
