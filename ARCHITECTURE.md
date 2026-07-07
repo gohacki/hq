@@ -63,22 +63,33 @@ notification gating against the presence setting; the queue is durable.
 
 ## Agent layer
 
-Two harnesses behind the same `agent.Harness`/`Session` interface:
+The harness is a per-role setting in `~/.config/hq/config.json`
+(`em_harness` for the director/EMs, `eng_harness` for engineers; both
+default `claude`, env `HQ_EM_HARNESS`/`HQ_ENG_HARNESS` override). hq rolls
+its own chat stream, so the UX is identical whichever harness runs a role:
+every adapter feeds the same events — streaming text deltas (the live
+typing bubble), tool-use lines, complete messages, turn results.
 
-- **Engineers — Claude Code** (`internal/agent/claude`): headless
-  `claude -p --input-format stream-json --output-format stream-json`,
+- **claude** (`internal/agent/claude`): headless
+  `claude -p --input-format stream-json --output-format stream-json
+  --include-partial-messages` (partials feed the typing bubble),
   `--resume` for durable memory and desk visits, `--model` per spec
   (default sonnet; `fable`→`claude-fable-5`). Runs
-  `--dangerously-skip-permissions`: engineers are isolated in worktrees.
-- **Director/EMs — pi** (`internal/agent/pi`): the open-source pi coding
-  agent in RPC mode (`pi --mode rpc`), a subprocess speaking JSONL
-  commands/events over stdio — structured events, no PTY. Session identity
-  is the pi session file under `<data>/pi-sessions/`, resumed with
-  `--session`; mid-turn sends queue as steering. pi has no MCP, so the EM
-  tool set is served as the `hq em` CLI (same tools as `hq mcp-em`, same
-  daemon RPCs) and documented in the role prompt. Picked at daemon boot
-  when `pi` is on PATH (override: `HQ_EM_HARNESS=pi|claude`); falls back to
-  claude, and the delegate-don't-do rule stays prompt-enforced either way.
+  `--dangerously-skip-permissions`: engineers are isolated in worktrees;
+  managers are prompt-constrained (delegate-don't-do).
+- **pi** (`internal/agent/pi`): the open-source pi coding agent in RPC mode
+  (`pi --mode rpc`), a subprocess speaking JSONL commands/events over
+  stdio — no PTY. Session identity is the pi session file under
+  `<data>/pi-sessions/`, resumed with `--session`; mid-turn sends queue as
+  steering. `HQ_PI_PROVIDER` selects a custom provider from
+  `~/.pi/agent/models.json` (e.g. a LiteLLM/Bedrock proxy) and models are
+  provider-qualified. pi has no MCP, so the EM tool set is served as the
+  `hq em` CLI (same tools as `hq mcp-em`, same daemon RPCs) and documented
+  in the role prompt.
+
+Harness switches self-heal: each adapter ignores a stored session id that
+belongs to the other (pi's are file paths, claude's are UUIDs) and starts
+fresh instead of dying silently.
 
 ## Orchestration
 

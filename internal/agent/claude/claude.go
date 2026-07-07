@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,7 +66,8 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 		"-p",
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
-		"--verbose", // required with -p + stream-json output
+		"--verbose",                  // required with -p + stream-json output
+		"--include-partial-messages", // stream_event frames feed the live typing bubble
 	}
 	model := spec.Model
 	if model == "" {
@@ -77,7 +79,10 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 	if spec.SystemPrompt != "" {
 		args = append(args, "--append-system-prompt", spec.SystemPrompt)
 	}
-	if spec.ResumeSessionID != "" {
+	if spec.ResumeSessionID != "" && !strings.Contains(spec.ResumeSessionID, "/") {
+		// Claude session ids are UUIDs; a path here is another harness's
+		// session (e.g. pi's file) left over from a harness switch — start
+		// fresh instead of resuming something claude can't load.
 		args = append(args, "--resume", spec.ResumeSessionID)
 	}
 	if spec.MCPConfigPath != "" {
@@ -129,6 +134,7 @@ type session struct {
 
 	mu        sync.Mutex
 	sessionID string
+	partial   string // accumulating text of the currently streaming block
 }
 
 func (s *session) SessionID() string {
@@ -180,18 +186,28 @@ func (s *session) Close() error {
 
 // stream-json output frames we care about.
 type outFrame struct {
-	Type      string `json:"type"`    // system | assistant | user | result
+	Type      string `json:"type"`    // system | assistant | user | result | stream_event
 	Subtype   string `json:"subtype"` // init (system), success/error... (result)
 	SessionID string `json:"session_id"`
 	Result    string `json:"result"`
 	IsError   bool   `json:"is_error"`
 	Message   struct {
 		Content []struct {
-			Type string `json:"type"` // text | tool_use
-			Text string `json:"text"`
-			Name string `json:"name"`
+			Type  string          `json:"type"` // text | tool_use
+			Text  string          `json:"text"`
+			Name  string          `json:"name"`
+			Input json.RawMessage `json:"input"`
 		} `json:"content"`
 	} `json:"message"`
+	// stream_event payload (--include-partial-messages): the raw Anthropic
+	// SSE event; only text deltas matter here.
+	Event struct {
+		Type  string `json:"type"` // content_block_delta | content_block_stop | ...
+		Delta struct {
+			Type string `json:"type"` // text_delta | thinking_delta | input_json_delta
+			Text string `json:"text"`
+		} `json:"delta"`
+	} `json:"event"`
 }
 
 func (s *session) readLoop(stdout io.Reader) {
@@ -211,7 +227,24 @@ func (s *session) readLoop(stdout io.Reader) {
 				s.mu.Unlock()
 				s.events <- agent.Event{Kind: agent.EvInit, SessionID: f.SessionID}
 			}
+		case "stream_event":
+			// Live typing: accumulate text deltas and re-emit text-so-far.
+			// Non-blocking — the full assistant frame is authoritative, so a
+			// slow consumer just skips deltas rather than stalling stdout.
+			if f.Event.Type == "content_block_delta" && f.Event.Delta.Type == "text_delta" && f.Event.Delta.Text != "" {
+				s.mu.Lock()
+				s.partial += f.Event.Delta.Text
+				partial := s.partial
+				s.mu.Unlock()
+				select {
+				case s.events <- agent.Event{Kind: agent.EvTextDelta, Text: partial}:
+				default:
+				}
+			}
 		case "assistant":
+			s.mu.Lock()
+			s.partial = ""
+			s.mu.Unlock()
 			for _, c := range f.Message.Content {
 				switch c.Type {
 				case "text":
@@ -219,7 +252,7 @@ func (s *session) readLoop(stdout io.Reader) {
 						s.events <- agent.Event{Kind: agent.EvText, Text: c.Text}
 					}
 				case "tool_use":
-					s.events <- agent.Event{Kind: agent.EvToolUse, Tool: c.Name}
+					s.events <- agent.Event{Kind: agent.EvToolUse, Tool: c.Name, Text: agent.SummarizeArgs(c.Input)}
 				}
 			}
 		case "result":

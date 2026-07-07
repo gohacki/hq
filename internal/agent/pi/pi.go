@@ -16,7 +16,6 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"sort"
 	"strings"
 	"sync"
 
@@ -254,37 +253,6 @@ type frame struct {
 	Method string `json:"method"`
 }
 
-// argsSummary flattens a tool's args into one short human line ("command:
-// hq em --project … list") for the chat's activity display.
-func argsSummary(raw json.RawMessage) string {
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil || len(m) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(m))
-	for k, v := range m {
-		s := strings.ReplaceAll(strings.TrimSpace(strings.Trim(strings.TrimPrefix(string(mustJSON(v)), "\""), "\"")), "\n", " ")
-		if len(s) > 120 {
-			s = s[:120] + "…"
-		}
-		parts = append(parts, k+": "+s)
-	}
-	sort.Strings(parts)
-	out := strings.Join(parts, " · ")
-	if len(out) > 240 {
-		out = out[:240] + "…"
-	}
-	return out
-}
-
-func mustJSON(v any) []byte {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
 type piMessage struct {
 	Role    string `json:"role"`
 	Content []struct {
@@ -371,7 +339,7 @@ func (s *session) readLoop(stdout io.Reader) {
 				}
 			}
 		case "tool_execution_start":
-			s.events <- agent.Event{Kind: agent.EvToolUse, Tool: f.ToolName, Text: argsSummary(f.Args)}
+			s.events <- agent.Event{Kind: agent.EvToolUse, Tool: f.ToolName, Text: agent.SummarizeArgs(f.Args)}
 		case "tool_execution_end":
 			if f.IsError {
 				s.events <- agent.Event{Kind: agent.EvToolUse, Tool: f.ToolName, Text: "failed", IsError: true}

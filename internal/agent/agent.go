@@ -3,7 +3,39 @@
 // behind the same interface.
 package agent
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+	"sort"
+	"strings"
+)
+
+// SummarizeArgs flattens a tool call's args into one short human line
+// ("command: hq em … list") for chat activity display.
+func SummarizeArgs(raw json.RawMessage) string {
+	var m map[string]any
+	if json.Unmarshal(raw, &m) != nil || len(m) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(m))
+	for k, v := range m {
+		b, err := json.Marshal(v)
+		if err != nil {
+			continue
+		}
+		s := strings.ReplaceAll(strings.TrimSpace(strings.Trim(string(b), `"`)), "\n", " ")
+		if len(s) > 120 {
+			s = s[:120] + "…"
+		}
+		parts = append(parts, k+": "+s)
+	}
+	sort.Strings(parts)
+	out := strings.Join(parts, " · ")
+	if len(out) > 240 {
+		out = out[:240] + "…"
+	}
+	return out
+}
 
 // Spec describes one agent session to start.
 type Spec struct {

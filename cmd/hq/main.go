@@ -129,31 +129,27 @@ func runDaemon(paths config.Paths) error {
 	}
 	defer st.Close()
 
+	cfg, err := paths.LoadConfig()
+	if err != nil {
+		return err
+	}
 	d := daemon.New(paths, st, log)
-	d.Orch = orch.New(d, claude.New(), managerHarness(paths, log), log)
+	d.Orch = orch.New(d, harnessByName(cfg.EngHarness, paths, log, "engineers"), harnessByName(cfg.EMHarness, paths, log, "director/EMs"), log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return d.Run(ctx)
 }
 
-// managerHarness picks what the director and EMs run on: pi (the
-// open-source harness, rendered natively in the TUI) when it's installed
-// or forced, Claude Code otherwise. HQ_EM_HARNESS=pi|claude overrides.
-func managerHarness(paths config.Paths, log *slog.Logger) agent.Harness {
-	choice := os.Getenv("HQ_EM_HARNESS")
-	if choice == "" {
-		if _, err := exec.LookPath("pi"); err == nil {
-			choice = "pi"
-		} else {
-			choice = "claude"
-		}
-	}
-	if choice == "pi" {
-		log.Info("manager harness: pi")
+// harnessByName builds the harness a role runs on, per hq's config
+// (config.json: em_harness / eng_harness, default claude). The chat UX is
+// identical either way — hq renders every harness's stream natively.
+func harnessByName(name string, paths config.Paths, log *slog.Logger, role string) agent.Harness {
+	if name == "pi" {
+		log.Info("harness", "role", role, "harness", "pi")
 		return pi.New(paths.PiSessionsDir())
 	}
-	log.Info("manager harness: claude")
+	log.Info("harness", "role", role, "harness", "claude")
 	return claude.New()
 }
 
