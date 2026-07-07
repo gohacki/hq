@@ -19,7 +19,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gohacki/hq/internal/agent"
 	"github.com/gohacki/hq/internal/agent/claude"
+	"github.com/gohacki/hq/internal/agent/pi"
 	"github.com/gohacki/hq/internal/config"
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/orch"
@@ -66,6 +68,8 @@ func run(args []string) error {
 		return runCall(paths, args[1:])
 	case "mcp-em":
 		return orch.RunEMMCP(paths, args[1:])
+	case "em":
+		return orch.RunEMCLI(paths, args[1:])
 	case "chat-header":
 		return runChatHeader(paths, args[1:])
 	case "help", "--help", "-h":
@@ -126,11 +130,31 @@ func runDaemon(paths config.Paths) error {
 	defer st.Close()
 
 	d := daemon.New(paths, st, log)
-	d.Orch = orch.New(d, claude.New(), log)
+	d.Orch = orch.New(d, claude.New(), managerHarness(paths, log), log)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	return d.Run(ctx)
+}
+
+// managerHarness picks what the director and EMs run on: pi (the
+// open-source harness, rendered natively in the TUI) when it's installed
+// or forced, Claude Code otherwise. HQ_EM_HARNESS=pi|claude overrides.
+func managerHarness(paths config.Paths, log *slog.Logger) agent.Harness {
+	choice := os.Getenv("HQ_EM_HARNESS")
+	if choice == "" {
+		if _, err := exec.LookPath("pi"); err == nil {
+			choice = "pi"
+		} else {
+			choice = "claude"
+		}
+	}
+	if choice == "pi" {
+		log.Info("manager harness: pi")
+		return pi.New(paths.PiSessionsDir())
+	}
+	log.Info("manager harness: claude")
+	return claude.New()
 }
 
 // stopDaemon SIGTERMs the daemon named by the pid file and waits for it to
@@ -254,16 +278,22 @@ func runCall(paths config.Paths, args []string) error {
 }
 
 func runDoctor() error {
-	tools := []struct{ name, why string }{
-		{"claude", "agent harness (required)"},
-		{"tmux", "live agent sessions (required for chat's v/t — run hq inside it)"},
-		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)"},
-		{"git", "worktrees + everything else"},
+	tools := []struct {
+		name, why string
+		optional  bool
+	}{
+		{"claude", "engineer harness (required)", false},
+		{"pi", "manager harness for the director/EMs (falls back to claude)", true},
+		{"tmux", "live agent sessions (required for chat's v/t — run hq inside it)", false},
+		{"no-mistakes", "delivery pipeline (required for no-mistakes projects)", false},
+		{"git", "worktrees + everything else", false},
 	}
 	ok := true
 	for _, t := range tools {
 		if p, err := exec.LookPath(t.name); err == nil {
 			fmt.Printf("  ok  %-12s %s\n", t.name, p)
+		} else if t.optional {
+			fmt.Printf("  --  %-12s %s\n", t.name, t.why)
 		} else {
 			fmt.Printf("MISS  %-12s %s\n", t.name, t.why)
 			ok = false

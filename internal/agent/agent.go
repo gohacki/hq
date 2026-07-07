@@ -58,4 +58,8 @@ type Harness interface {
 	// the TUI spawns this under its own embedded pty — on the given model
 	// ("" = default), with any extra harness args (e.g. an MCP config).
 	InteractiveCommand(sessionID, model string, extraArgs ...string) []string
+	// SupportsMCP says whether Spec.MCPConfigPath means anything to this
+	// harness. When it doesn't, callers expose tools another way (hq's EM
+	// tools become the `hq em` CLI, documented in the role prompt).
+	SupportsMCP() bool
 }

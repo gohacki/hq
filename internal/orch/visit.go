@@ -41,12 +41,15 @@ func (o *Orch) checkoutEM(projectID string) (Checkout, error) {
 	o.dropEM(p.ID)
 	dir := o.d.Paths.ProjectDir(p.Name)
 	// Same MCP tools as the headless EM, so the interactive session can
-	// delegate tickets too.
+	// delegate tickets too. (pi has no MCP — its tools already reach the
+	// daemon through the `hq em` CLI documented in the session's prompt.)
 	extra := []string{}
-	if mcp := filepath.Join(dir, "mcp.json"); fileExists(mcp) {
-		extra = append(extra, "--mcp-config", mcp)
+	if o.emHarness.SupportsMCP() {
+		if mcp := filepath.Join(dir, "mcp.json"); fileExists(mcp) {
+			extra = append(extra, "--mcp-config", mcp)
+		}
 	}
-	argv := o.harness.InteractiveCommand(p.EMSessionID, p.EMModel, extra...)
+	argv := o.emHarness.InteractiveCommand(p.EMSessionID, p.EMModel, extra...)
 	return Checkout{Argv: argv, Dir: dir}, nil
 }
 

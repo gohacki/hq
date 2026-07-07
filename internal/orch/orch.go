@@ -25,9 +25,10 @@ import (
 const emIdleTimeout = 15 * time.Minute
 
 type Orch struct {
-	d       *daemon.Daemon
-	harness agent.Harness
-	log     *slog.Logger
+	d         *daemon.Daemon
+	harness   agent.Harness // engineers (Claude Code)
+	emHarness agent.Harness // director + EMs (pi when available)
+	log       *slog.Logger
 
 	mu        sync.Mutex
 	ems       map[string]*em                // project id → live EM/director process
@@ -40,8 +41,11 @@ type em struct {
 	lastUse time.Time
 }
 
-func New(d *daemon.Daemon, h agent.Harness, log *slog.Logger) *Orch {
-	o := &Orch{d: d, harness: h, log: log, ems: map[string]*em{}, engs: map[string]*engRun{}, visitPrev: map[string]store.TicketStatus{}}
+// New builds the orchestration layer. eng runs engineers (Claude Code); em
+// runs the director and project EMs (the open-source manager harness; pass
+// the same harness for both to keep everything on one).
+func New(d *daemon.Daemon, eng, mgr agent.Harness, log *slog.Logger) *Orch {
+	o := &Orch{d: d, harness: eng, emHarness: mgr, log: log, ems: map[string]*em{}, engs: map[string]*engRun{}, visitPrev: map[string]store.TicketStatus{}}
 	o.registerHandlers()
 	go o.reapIdleEMs()
 	return o
@@ -189,10 +193,6 @@ func (o *Orch) dropEM(projectID string) {
 }
 
 func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) error {
-	mcpPath, err := o.writeEMMCPConfig(p)
-	if err != nil {
-		return err
-	}
 	sysPrompt := emSystemPrompt(p)
 	if o.isDirectorRoom(p) {
 		sysPrompt = directorSystemPrompt()
@@ -203,14 +203,24 @@ func (o *Orch) startEM(ctx context.Context, p store.Project, prompt string) erro
 		SystemPrompt:    sysPrompt,
 		Prompt:          prompt,
 		ResumeSessionID: p.EMSessionID,
-		MCPConfigPath:   mcpPath,
 		Autonomous:      true, // full tool access; delegate-don't-do is prompt-enforced
 	}
-	sess, err := o.harness.Start(ctx, spec)
+	if o.emHarness.SupportsMCP() {
+		mcpPath, err := o.writeEMMCPConfig(p)
+		if err != nil {
+			return err
+		}
+		spec.MCPConfigPath = mcpPath
+	} else {
+		// No MCP (pi): the same tool set is reachable as the `hq em` CLI —
+		// teach the role prompt how to call it.
+		spec.SystemPrompt += cliToolsSection(p.ID, o.isDirectorRoom(p))
+	}
+	sess, err := o.emHarness.Start(ctx, spec)
 	if err != nil && p.EMSessionID != "" {
-		// Stale session id (e.g. claude storage cleaned) — start fresh.
+		// Stale session id (e.g. harness storage cleaned) — start fresh.
 		spec.ResumeSessionID = ""
-		sess, err = o.harness.Start(ctx, spec)
+		sess, err = o.emHarness.Start(ctx, spec)
 	}
 	if err != nil {
 		return err

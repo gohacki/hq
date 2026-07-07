@@ -63,12 +63,22 @@ notification gating against the presence setting; the queue is durable.
 
 ## Agent layer
 
-`agent.Harness`/`Session` unchanged from v1: headless
-`claude -p --input-format stream-json --output-format stream-json`,
-`--append-system-prompt` for director/EM roles, `--resume` for durable memory and
-desk visits, `--model` per spec (default sonnet; `fable`→`claude-fable-5`).
-All agents run `--dangerously-skip-permissions`: engineers are isolated in
-worktrees; the director/EM delegate-don't-do rule is prompt-enforced.
+Two harnesses behind the same `agent.Harness`/`Session` interface:
+
+- **Engineers — Claude Code** (`internal/agent/claude`): headless
+  `claude -p --input-format stream-json --output-format stream-json`,
+  `--resume` for durable memory and desk visits, `--model` per spec
+  (default sonnet; `fable`→`claude-fable-5`). Runs
+  `--dangerously-skip-permissions`: engineers are isolated in worktrees.
+- **Director/EMs — pi** (`internal/agent/pi`): the open-source pi coding
+  agent in RPC mode (`pi --mode rpc`), a subprocess speaking JSONL
+  commands/events over stdio — structured events, no PTY. Session identity
+  is the pi session file under `<data>/pi-sessions/`, resumed with
+  `--session`; mid-turn sends queue as steering. pi has no MCP, so the EM
+  tool set is served as the `hq em` CLI (same tools as `hq mcp-em`, same
+  daemon RPCs) and documented in the role prompt. Picked at daemon boot
+  when `pi` is on PATH (override: `HQ_EM_HARNESS=pi|claude`); falls back to
+  claude, and the delegate-don't-do rule stays prompt-enforced either way.
 
 ## Orchestration
 

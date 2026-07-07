@@ -59,3 +59,7 @@ func (p Paths) TicketDir(project, ticketID string) string {
 
 // WorktreesDir holds every ticket's worktree set: worktrees/<ticket>/<repo>.
 func (p Paths) WorktreesDir() string { return filepath.Join(p.DataDir, "worktrees") }
+
+// PiSessionsDir holds the pi harness's session files (the director's and
+// EMs' durable memory when pi is the manager harness).
+func (p Paths) PiSessionsDir() string { return filepath.Join(p.DataDir, "pi-sessions") }

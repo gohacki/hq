@@ -47,6 +47,8 @@ func ResolveModel(m string) string {
 	}
 }
 
+func (h *Harness) SupportsMCP() bool { return true }
+
 func (h *Harness) InteractiveCommand(sessionID, model string, extraArgs ...string) []string {
 	if model == "" {
 		model = h.Model

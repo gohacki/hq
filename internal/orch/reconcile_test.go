@@ -27,6 +27,8 @@ func (f *fakeHarness) Start(ctx context.Context, spec agent.Spec) (agent.Session
 	return &fakeSession{events: f.events}, nil
 }
 
+func (f *fakeHarness) SupportsMCP() bool { return true }
+
 func (f *fakeHarness) InteractiveCommand(sessionID, model string, extra ...string) []string {
 	return []string{"fake"}
 }
@@ -53,7 +55,7 @@ func TestReconcileResumesRunningEngineers(t *testing.T) {
 	d := daemon.New(paths, st, slog.New(slog.DiscardHandler))
 	fh := &fakeHarness{events: make(chan agent.Event)}
 	defer close(fh.events)
-	o := New(d, fh, slog.New(slog.DiscardHandler))
+	o := New(d, fh, fh, slog.New(slog.DiscardHandler))
 	d.Orch = o
 
 	if err := st.CreateProject(store.Project{ID: "p1", Name: "proj"}); err != nil {

@@ -5,11 +5,88 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/gohacki/hq/internal/config"
 	"github.com/gohacki/hq/internal/mcp"
 	"github.com/gohacki/hq/internal/rpc"
 )
+
+// RunEMCLI implements `hq em --project <id> [--director] <tool> ['<json>']`:
+// the same tool set RunEMMCP serves over MCP, exposed as a plain CLI for
+// manager harnesses without MCP support (pi). `<tool> list` prints the
+// catalog. Every call still turns into a daemon RPC — managers never touch
+// state directly.
+func RunEMCLI(paths config.Paths, args []string) error {
+	fs := flag.NewFlagSet("em", flag.ContinueOnError)
+	projectID := fs.String("project", "", "project id this manager belongs to")
+	director := fs.Bool("director", false, "expose director (home room) tools")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if *projectID == "" || len(rest) == 0 {
+		return fmt.Errorf("usage: hq em --project <id> [--director] <tool>|list ['<json-args>']")
+	}
+	if rest[0] == "list" {
+		for _, t := range emTools(nil, *projectID, *director) {
+			fmt.Printf("%s — %s\n", t.Name, t.Description)
+		}
+		return nil
+	}
+	cl, err := rpc.Dial(paths.SocketPath())
+	if err != nil {
+		return fmt.Errorf("hq daemon not reachable: %w", err)
+	}
+	defer cl.Close()
+	raw := json.RawMessage(`{}`)
+	if len(rest) > 1 {
+		raw = json.RawMessage(rest[1])
+	}
+	for _, t := range emTools(cl, *projectID, *director) {
+		if t.Name == rest[0] {
+			out, err := t.Run(raw)
+			if err != nil {
+				return err
+			}
+			fmt.Println(out)
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown tool %q — run `hq em --project %s list`", rest[0], *projectID)
+}
+
+// cliToolsSection documents the EM tool surface for manager harnesses
+// without MCP: the identical tools, invoked through the hq binary. Appended
+// to the role system prompt by startEM.
+func cliToolsSection(projectID string, director bool) string {
+	exe, err := os.Executable()
+	if err != nil {
+		exe = "hq"
+	}
+	flagStr := ""
+	if director {
+		flagStr = " --director"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, `
+
+## Your hq tools (CLI)
+
+Your hq tools are shell commands, not built-ins. Call one per bash
+invocation, args as a single JSON object:
+
+    %s em --project %s%s <tool> '<json-args>'
+
+The result prints as JSON. Tools:
+
+`, exe, projectID, flagStr)
+	for _, t := range emTools(nil, projectID, director) {
+		schema, _ := json.Marshal(t.InputSchema)
+		fmt.Fprintf(&b, "- %s — %s\n  args schema: %s\n", t.Name, t.Description, schema)
+	}
+	return b.String()
+}
 
 // RunEMMCP implements `hq mcp-em --project <id> [--director]`: the MCP
 // stdio server Claude Code spawns for an EM (or the director). Every tool
