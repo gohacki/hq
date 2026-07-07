@@ -59,10 +59,11 @@ const helpBody = `  HQ HELP                                      (any key closes
     set_playbook tool; ask it to update the playbook when reality changes.
 
   LIVE SESSIONS (v)
-    v opens the attach picker: choose the EM or a live engineer, and the
-    real Claude Code CLI opens in a NEW tmux window (with an info header).
-    Close the window or exit the CLI to hand the session back to headless
-    supervision. Requires hq to be running inside tmux.
+    v opens the attach picker: choose the director/EM or a live engineer,
+    and the agent's real CLI (Claude Code for engineers, pi for managers)
+    opens in a NEW tmux window with an info header. Close the window or
+    exit the CLI to hand the session back to headless supervision.
+    Requires hq to be running inside tmux.
 
   PLAN REVIEW
     EMs propose plans for non-trivial work: a doc, proposed tickets, open

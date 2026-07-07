@@ -445,7 +445,8 @@ func (m *model) headerView() string {
 }
 
 // ticketMetaLine is the ticket chat's second header row: everything you'd
-// want to know at a glance — status, model, worktree, dev URL, age.
+// want to know at a glance — status, model, branch, worktree, dev URL, age,
+// and how to open the engineer's real session.
 func (m *model) ticketMetaLine() string {
 	for i := range m.tickets {
 		t := &m.tickets[i]
@@ -453,14 +454,40 @@ func (m *model) ticketMetaLine() string {
 			continue
 		}
 		parts := []string{fmt.Sprintf("%s %s", statusIcon(t.Status), t.Status), t.Kind, orDefaultModel(t.Model)}
+		if t.Branch != "" {
+			parts = append(parts, "⎇ "+t.Branch)
+		}
 		if t.WorktreePath != "" {
 			parts = append(parts, "⌂ "+shortPath(t.WorktreePath))
 		}
+		// Dev-server link: the open demo item's URL while one is pending,
+		// falling back to the last URL the engineer posted — the link should
+		// survive the demo item being resolved while you're still poking.
 		if u := m.demoURLs()[t.ID]; u != "" {
+			parts = append(parts, styleURL.Render(u))
+		} else if u := m.lastEngURL(t.ID); u != "" {
 			parts = append(parts, styleURL.Render(u))
 		}
 		parts = append(parts, age(t.UpdatedAt))
+		if t.SessionID != "" {
+			parts = append(parts, styleDim.Render("v: open the engineer's session"))
+		}
 		return strings.Join(parts, "  ·  ")
+	}
+	return ""
+}
+
+// lastEngURL is the most recent URL the ticket's engineer mentioned —
+// usually a dev server from a DEMO turn.
+func (m *model) lastEngURL(ticketID string) string {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		msg := m.messages[i]
+		if msg.TicketID != ticketID || !strings.HasPrefix(msg.Author, "eng:") {
+			continue
+		}
+		if u := reHTTPURL.FindString(msg.Body); u != "" {
+			return u
+		}
 	}
 	return ""
 }
