@@ -5,7 +5,6 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/gohacki/hq/internal/daemon"
 	"github.com/gohacki/hq/internal/store"
@@ -281,8 +280,6 @@ func (m *model) interruptCount() int {
 
 func (m *model) sidebarView(height int) string {
 	var b strings.Builder
-	mode := map[string]string{"heads-down": "🎧", "available": "🟢", "review": "👀"}[m.presence]
-	b.WriteString(lipgloss.NewStyle().Bold(true).Render(" ▦ hq "+mode) + "\n")
 	for i, it := range m.side {
 		var line string
 		switch it.kind {

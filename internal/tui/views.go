@@ -27,7 +27,6 @@ var (
 	styleSideActive = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("110"))
 	styleSideChan   = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
 	styleSideTask   = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	styleBadge      = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("160")).Padding(0, 1).Bold(true)
 	styleBadgeSoft  = lipgloss.NewStyle().Foreground(lipgloss.Color("15")).Background(lipgloss.Color("172")).Padding(0, 1)
 	// styleBadgeQuiet marks sidebar unread counts: visible, never shouting.
 	styleBadgeQuiet = lipgloss.NewStyle().Foreground(lipgloss.Color("172"))
