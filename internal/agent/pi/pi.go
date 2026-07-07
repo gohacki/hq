@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/gohacki/hq/internal/agent"
@@ -88,7 +89,13 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 		args = append(args, "--append-system-prompt", spec.SystemPrompt)
 	}
 	if spec.ResumeSessionID != "" {
-		args = append(args, "--session", spec.ResumeSessionID)
+		// Our pi session ids are file paths. Anything else (a claude UUID
+		// left over from a harness switch, a deleted file) would make pi
+		// print "No session found" and exit 0 — silently. Start fresh
+		// instead; the new id is persisted on init as usual.
+		if _, err := os.Stat(spec.ResumeSessionID); err == nil {
+			args = append(args, "--session", spec.ResumeSessionID)
+		}
 	}
 
 	cmd := exec.CommandContext(ctx, h.Bin, args...)
@@ -101,7 +108,8 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 	if err != nil {
 		return nil, err
 	}
-	cmd.Stderr = nil
+	stderrTail := &tailBuffer{}
+	cmd.Stderr = stderrTail
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
@@ -109,6 +117,7 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 	s := &session{
 		cmd:    cmd,
 		stdin:  stdin,
+		stderr: stderrTail,
 		events: make(chan agent.Event, 256),
 	}
 	go s.readLoop(stdout)
@@ -130,12 +139,37 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 type session struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
+	stderr *tailBuffer
 	events chan agent.Event
 
 	mu        sync.Mutex
 	sessionID string
 	lastText  string // last assistant message text; agent_end's EvResult carries it
 	lastErr   string // provider error from an errored assistant message, if any
+	closed    bool   // Close() called — an exit afterwards is expected, not an error
+}
+
+// tailBuffer keeps the last chunk of pi's stderr so a startup death has a
+// story to tell.
+type tailBuffer struct {
+	mu  sync.Mutex
+	buf []byte
+}
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > 2048 {
+		t.buf = t.buf[len(t.buf)-2048:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return strings.TrimSpace(string(t.buf))
 }
 
 func (s *session) SessionID() string {
@@ -169,6 +203,9 @@ func (s *session) Interrupt() error {
 }
 
 func (s *session) Close() error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	s.stdin.Close() // pi exits when stdin closes
 	if s.cmd.Process != nil {
 		s.cmd.Process.Kill()
@@ -286,6 +323,18 @@ func (s *session) readLoop(stdout io.Reader) {
 		}
 	}
 	s.cmd.Wait()
+	s.mu.Lock()
+	diedEarly := s.sessionID == "" && !s.closed
+	s.mu.Unlock()
+	if diedEarly {
+		// pi exited before completing init (bad flag, unknown session,
+		// auth problem) — without this the chat just goes quiet.
+		msg := "pi exited at startup"
+		if tail := s.stderr.String(); tail != "" {
+			msg += ": " + tail
+		}
+		s.events <- agent.Event{Kind: agent.EvResult, IsError: true, Text: msg}
+	}
 	s.events <- agent.Event{Kind: agent.EvExited}
 	close(s.events)
 }
