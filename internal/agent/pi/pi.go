@@ -25,15 +25,24 @@ import (
 type Harness struct {
 	Bin        string
 	Model      string // default model alias when a spec has none
+	Provider   string // pi provider name (anthropic, or a custom one from ~/.pi/agent/models.json)
 	SessionDir string // where pi session files live
 }
 
+// New builds the pi harness. HQ_PI_PROVIDER selects a custom provider
+// defined in ~/.pi/agent/models.json (e.g. a LiteLLM/Bedrock proxy); that
+// provider must define the model ids ResolveModel produces, typically as
+// aliases onto the proxy's own model names.
 func New(sessionDir string) *Harness {
 	model := os.Getenv("HQ_MODEL")
 	if model == "" {
 		model = "sonnet"
 	}
-	return &Harness{Bin: "pi", Model: model, SessionDir: sessionDir}
+	provider := os.Getenv("HQ_PI_PROVIDER")
+	if provider == "" {
+		provider = "anthropic"
+	}
+	return &Harness{Bin: "pi", Model: model, Provider: provider, SessionDir: sessionDir}
 }
 
 // ResolveModel maps hq's model aliases onto concrete Anthropic model ids —
@@ -57,7 +66,7 @@ func (h *Harness) SupportsMCP() bool { return false }
 // InteractiveCommand opens pi's own TUI on the same session file — used by
 // desk visits (`v` attach).
 func (h *Harness) InteractiveCommand(sessionID, model string, extraArgs ...string) []string {
-	cmd := []string{h.Bin, "--provider", "anthropic"}
+	cmd := []string{h.Bin, "--provider", h.Provider}
 	if sessionID != "" {
 		cmd = append(cmd, "--session", sessionID)
 	}
@@ -74,7 +83,7 @@ func (h *Harness) Start(ctx context.Context, spec agent.Spec) (agent.Session, er
 	}
 	args := []string{
 		"--mode", "rpc",
-		"--provider", "anthropic",
+		"--provider", h.Provider,
 		"--session-dir", h.SessionDir,
 		"--no-approve", // never trust project-local extensions from RPC: no one is at the dialog
 	}
