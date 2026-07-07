@@ -135,6 +135,7 @@ type session struct {
 	mu        sync.Mutex
 	sessionID string
 	lastText  string // last assistant message text; agent_end's EvResult carries it
+	lastErr   string // provider error from an errored assistant message, if any
 }
 
 func (s *session) SessionID() string {
@@ -199,6 +200,11 @@ type piMessage struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	} `json:"content"`
+	// An errored turn arrives as an assistant message with empty content,
+	// stopReason "error", and the provider error here (e.g. 400 no extra
+	// usage) — it must surface, not vanish.
+	StopReason   string `json:"stopReason"`
+	ErrorMessage string `json:"errorMessage"`
 }
 
 func (m *piMessage) text() string {
@@ -241,7 +247,14 @@ func (s *session) readLoop(stdout io.Reader) {
 			}
 		case "message_end":
 			if f.Message != nil && f.Message.Role == "assistant" {
-				if txt := f.Message.text(); txt != "" {
+				if f.Message.StopReason == "error" || f.Message.ErrorMessage != "" {
+					s.mu.Lock()
+					s.lastErr = f.Message.ErrorMessage
+					if s.lastErr == "" {
+						s.lastErr = "provider error (no detail)"
+					}
+					s.mu.Unlock()
+				} else if txt := f.Message.text(); txt != "" {
 					s.mu.Lock()
 					s.lastText = txt
 					s.mu.Unlock()
@@ -250,10 +263,14 @@ func (s *session) readLoop(stdout io.Reader) {
 			}
 		case "agent_end":
 			s.mu.Lock()
-			txt := s.lastText
-			s.lastText = ""
+			txt, errText := s.lastText, s.lastErr
+			s.lastText, s.lastErr = "", ""
 			s.mu.Unlock()
-			s.events <- agent.Event{Kind: agent.EvResult, Text: txt}
+			if errText != "" {
+				s.events <- agent.Event{Kind: agent.EvResult, IsError: true, Text: errText}
+			} else {
+				s.events <- agent.Event{Kind: agent.EvResult, Text: txt}
+			}
 		case "auto_retry_end":
 			if f.Success != nil && !*f.Success {
 				s.events <- agent.Event{Kind: agent.EvResult, IsError: true, Text: f.FinalError}

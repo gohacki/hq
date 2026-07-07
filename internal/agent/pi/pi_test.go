@@ -17,6 +17,8 @@ echo '{"id":"hq-init","type":"response","command":"get_state","success":true,"da
 echo '{"type":"message_start","message":{"role":"assistant","content":[]}}'
 echo '{"type":"message_end","message":{"role":"assistant","content":[{"type":"thinking","text":"mull"},{"type":"text","text":"hello"},{"type":"text","text":"world"}]}}'
 echo '{"type":"agent_end","messages":[]}'
+echo '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error","errorMessage":"400 no extra usage"}}'
+echo '{"type":"agent_end","messages":[]}'
 echo '{"type":"response","command":"prompt","success":false,"error":"boom"}'
 cat >/dev/null
 `
@@ -57,6 +59,11 @@ func TestEventTranslation(t *testing.T) {
 	// agent_end carries the last assistant text as the turn result
 	if ev := next(); ev.Kind != agent.EvResult || ev.IsError || ev.Text != "hello\nworld" {
 		t.Fatalf("want result, got %+v", ev)
+	}
+	// an errored assistant turn (empty content, errorMessage set) surfaces
+	// as an error result at agent_end instead of vanishing
+	if ev := next(); ev.Kind != agent.EvResult || !ev.IsError || ev.Text != "400 no extra usage" {
+		t.Fatalf("want provider-error result, got %+v", ev)
 	}
 	// failed command response surfaces as an error result
 	if ev := next(); ev.Kind != agent.EvResult || !ev.IsError || ev.Text != "prompt: boom" {
