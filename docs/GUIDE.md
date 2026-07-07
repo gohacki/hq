@@ -243,8 +243,12 @@ model default).
 - **"daemon did not come up"** — check `~/.local/share/hq/logs/daemon.log`.
 - **"run hq inside tmux to open live sessions"** — attaching opens a tmux
   window; everything else works outside tmux.
-- **Ticket parked after a restart** — daemon restarts park in-flight
-  tickets (an inbox item appears). Reply in the thread; the session resumes.
+- **Daemon restarts** — running engineers are resumed automatically at the
+  next boot (same session, same worktree, a take-stock nudge). A ticket is
+  only parked (inbox item, reply-to-resume) when there is nothing to
+  resume — no session yet, or it was checked out for a desk visit.
+  `hq daemon restart` is the self-hosting deploy command: rebuild, restart,
+  everything resumes and the TUI reconnects on its own.
 - **"worktree kept (uncommitted changes)"** — hq refuses to recycle a
   worktree holding unlanded work. Inspect it (path in the message), then
   commit/discard, or return it with `treehouse return --force <path>`.

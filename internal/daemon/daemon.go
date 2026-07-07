@@ -28,6 +28,9 @@ type Orchestrator interface {
 	BossTicketMessage(ctx context.Context, t store.Ticket, body string)
 	// Reconcile is called at boot with all non-terminal tickets.
 	Reconcile(ctx context.Context, tickets []store.Ticket)
+	// Shutdown is called when the daemon is stopping; it closes live agent
+	// sessions so they resume cleanly on the next boot.
+	Shutdown()
 }
 
 type Daemon struct {
@@ -68,7 +71,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 		d.Orch.Reconcile(ctx, active)
 	}
 	d.Log.Info("daemon listening", "socket", d.Paths.SocketPath())
-	return d.Server.Serve(ctx)
+	err := d.Server.Serve(ctx)
+	if d.Orch != nil {
+		d.Orch.Shutdown()
+	}
+	return err
 }
 
 // legacyDirectorRoomName is the pre-rename name of the director's project;

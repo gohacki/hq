@@ -14,6 +14,8 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -47,10 +49,17 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "daemon":
-		if len(args) > 1 && args[1] == "run" {
-			return runDaemon(paths)
+		if len(args) > 1 {
+			switch args[1] {
+			case "run":
+				return runDaemon(paths)
+			case "stop":
+				return stopDaemon(paths)
+			case "restart":
+				return restartDaemon(paths)
+			}
 		}
-		return fmt.Errorf("usage: hq daemon run")
+		return fmt.Errorf("usage: hq daemon run|stop|restart")
 	case "doctor":
 		return runDoctor()
 	case "call":
@@ -73,6 +82,8 @@ const helpText = `hq — an engineering department as a program.
 Usage:
   hq                       open the TUI (auto-starts the daemon)
   hq daemon run            run the daemon in the foreground
+  hq daemon stop           stop the daemon (agents resume on next boot)
+  hq daemon restart        swap in the current hq binary; sessions resume
   hq doctor                check required external tools
   hq call <method> [json]  raw RPC to the daemon (scripting/debugging)
   hq help                  this help
@@ -122,6 +133,54 @@ func runDaemon(paths config.Paths) error {
 	return d.Run(ctx)
 }
 
+// stopDaemon SIGTERMs the daemon named by the pid file and waits for it to
+// exit. Agent sessions are closed cleanly and resume on the next boot.
+func stopDaemon(paths config.Paths) error {
+	b, err := os.ReadFile(paths.PIDPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			fmt.Println("daemon not running")
+			return nil
+		}
+		return err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		return fmt.Errorf("bad pid file %s: %w", paths.PIDPath(), err)
+	}
+	proc, _ := os.FindProcess(pid)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		os.Remove(paths.PIDPath())
+		fmt.Println("daemon not running (stale pid file removed)")
+		return nil
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			fmt.Println("daemon stopped")
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("daemon (pid %d) did not stop within 10s", pid)
+}
+
+// restartDaemon is the self-hosting deploy command: stop the old daemon,
+// start one from the current binary, and let Reconcile resume every
+// engineer session where it left off.
+func restartDaemon(paths config.Paths) error {
+	if err := stopDaemon(paths); err != nil {
+		return err
+	}
+	cl, err := connect(paths)
+	if err != nil {
+		return err
+	}
+	cl.Close()
+	fmt.Println("daemon restarted — agent sessions resume automatically")
+	return nil
+}
+
 // connect dials the daemon, auto-starting it if the socket is dead.
 func connect(paths config.Paths) (*rpc.Client, error) {
 	if cl, err := rpc.Dial(paths.SocketPath()); err == nil {
@@ -154,7 +213,21 @@ func runTUI(paths config.Paths) error {
 		return err
 	}
 	defer cl.Close()
-	return tui.Run(cl)
+	// redial keeps the TUI alive across daemon restarts: wait for whoever is
+	// restarting the daemon (hq daemon restart, a deploy) to bring it back
+	// before falling back to auto-starting one ourselves — auto-starting too
+	// eagerly would race a restart and resurrect the old binary.
+	redial := func() (*rpc.Client, error) {
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			if cl, err := rpc.Dial(paths.SocketPath()); err == nil {
+				return cl, nil
+			}
+			time.Sleep(500 * time.Millisecond)
+		}
+		return connect(paths)
+	}
+	return tui.Run(cl, redial)
 }
 
 // runCall is a scripting/debugging passthrough: `hq call <method>

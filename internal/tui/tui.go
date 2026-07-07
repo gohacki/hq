@@ -20,27 +20,37 @@ import (
 	"github.com/gohacki/hq/internal/store"
 )
 
-func Run(cl *rpc.Client) error {
+// Run drives the TUI. redial (optional) reconnects to the daemon when the
+// socket drops — e.g. across an `hq daemon restart` — so the TUI survives
+// daemon deploys instead of dying with the connection.
+func Run(cl *rpc.Client, redial func() (*rpc.Client, error)) error {
 	if err := cl.Subscribe(); err != nil {
 		return err
 	}
 	m := newModel(cl)
+	m.redial = redial
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	m.sendMsg = p.Send // lets background pumps (e.g. a live agent's pty) push repaints
-	go func() {
-		for ev := range cl.Events() {
-			p.Send(daemonEvent{ev})
-		}
-		p.Send(daemonGone{})
-	}()
+	go pumpEvents(cl, p.Send)
 	_, err := p.Run()
 	return err
+}
+
+// pumpEvents forwards daemon events into the tea loop until the connection
+// dies, then reports it. Restarted with a fresh client after a reconnect.
+func pumpEvents(cl *rpc.Client, send func(tea.Msg)) {
+	for ev := range cl.Events() {
+		send(daemonEvent{ev})
+	}
+	send(daemonGone{})
 }
 
 // --- tea messages ---
 
 type daemonEvent struct{ ev rpc.Event }
 type daemonGone struct{}
+type daemonBack struct{ cl *rpc.Client }
+type daemonDead struct{ err error }
 type refreshed struct {
 	projects []daemon.ProjectView
 	tickets  []daemon.TicketView // open project's tickets
@@ -84,7 +94,8 @@ const (
 
 type model struct {
 	cl      *rpc.Client
-	sendMsg func(tea.Msg) // == tea.Program.Send; lets pump goroutines push repaints
+	redial  func() (*rpc.Client, error) // reconnect after the socket drops (nil = die)
+	sendMsg func(tea.Msg)               // == tea.Program.Send; lets pump goroutines push repaints
 
 	projects []daemon.ProjectView
 	tickets  []daemon.TicketView // of the open project
@@ -291,7 +302,32 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case daemonGone:
-		m.status = "daemon connection lost — restart hq"
+		if m.redial == nil {
+			m.status = "daemon connection lost — restart hq"
+			return m, nil
+		}
+		m.status = "daemon connection lost — reconnecting…"
+		redial := m.redial
+		return m, func() tea.Msg {
+			cl, err := redial()
+			if err != nil {
+				return daemonDead{err}
+			}
+			if err := cl.Subscribe(); err != nil {
+				cl.Close()
+				return daemonDead{err}
+			}
+			return daemonBack{cl}
+		}
+
+	case daemonBack:
+		m.cl = msg.cl
+		go pumpEvents(m.cl, m.sendMsg)
+		m.status = "reconnected to the daemon"
+		return m, m.refresh()
+
+	case daemonDead:
+		m.status = "daemon unreachable (" + msg.err.Error() + ") — fix it and restart hq"
 		return m, nil
 
 	case errMsg:

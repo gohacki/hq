@@ -87,6 +87,13 @@ worktrees; the director/EM delegate-don't-do rule is prompt-enforced.
   `plan.reject` messages the note back.
 - **Onboarding docs**: per-repo cache under `onboarding/`; seeded on
   project creation (spike if cache miss), `onboarding.refresh` replaces.
+- **Restarts (self-hosting loop)**: `hq daemon stop|restart` signal the pid
+  file; shutdown closes agent sessions cleanly (`Orchestrator.Shutdown`).
+  Boot `Reconcile` resumes running/delivering engineers in place
+  (`--resume` + take-stock nudge); tickets with no session, or checked out
+  for a desk visit, are parked as needs-input instead. The TUI survives the
+  restart: on socket drop it redials (waiting out the restart before
+  auto-starting a daemon itself) and resubscribes.
 
 ## TUI
 

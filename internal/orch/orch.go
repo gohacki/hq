@@ -63,18 +63,27 @@ func (o *Orch) BossTicketMessage(ctx context.Context, t store.Ticket, body strin
 	}
 }
 
-// Reconcile runs at daemon boot: a headless engineer process actually
-// running or mid-delivery did not survive the restart, so park those.
-// Tickets already sitting in needs-input/blocked (a demo, question, or
-// failure already correctly waiting on the boss — nothing was lost) are
-// left alone; parking them anyway would post a misleading "parked by
-// restart" message and a duplicate item next to whatever legitimately got
-// them there.
+// restartResumePrompt nudges a resumed engineer back into motion after a
+// daemon restart cut its previous process mid-run.
+const restartResumePrompt = `hq restarted while you were mid-run; your session was resumed. Take
+stock first — git status/log in your worktree and your own last messages —
+then continue the ticket from where you left off. End your turn with the
+usual DEMO:/STATUS:/QUESTION: marker.`
+
+// Reconcile runs at daemon boot. Engineer processes never survive a
+// restart, but their sessions do: tickets that were running or delivering
+// with a persisted session id are resumed in place (same worktree, same
+// session, a take-stock nudge). Anything that can't be resumed is parked
+// as needs-input. Tickets already sitting in needs-input/blocked (a demo,
+// question, or failure already correctly waiting on the boss — nothing was
+// lost) are left alone; parking them anyway would post a misleading
+// "parked by restart" message and a duplicate item next to whatever
+// legitimately got them there.
 //
-// Visiting tickets get the same treatment even though a live tmux chat
-// pane *might* still be running independent of the daemon: the daemon's
-// own in-memory ownership of that session (checkoutEngineer's bookkeeping)
-// is gone regardless of the pane's fate, and it has no way to tell "pane
+// Visiting tickets are always parked even though a live tmux chat pane
+// *might* still be running independent of the daemon: the daemon's own
+// in-memory ownership of that session (checkoutEngineer's bookkeeping) is
+// gone regardless of the pane's fate, and it has no way to tell "pane
 // still open" from "whole hq session died with it, ticket orphaned in
 // visiting forever" — needs-input is the safe default either way. If the
 // pane really is still open, its eventual close just finds the status
@@ -82,17 +91,49 @@ func (o *Orch) BossTicketMessage(ctx context.Context, t store.Ticket, body strin
 func (o *Orch) Reconcile(ctx context.Context, tickets []store.Ticket) {
 	go o.sweepTeardowns()
 	for _, t := range tickets {
-		if t.Status != store.TicketRunning && t.Status != store.TicketDelivering && t.Status != store.TicketVisiting {
-			continue
+		switch t.Status {
+		case store.TicketRunning, store.TicketDelivering:
+			if t.SessionID != "" && t.WorktreePath != "" {
+				if err := o.sendToEng(ctx, t, restartResumePrompt); err == nil {
+					o.systemMessage(t.ProjectID, t.ID, "hq restarted — engineer session resumed where it left off")
+					continue
+				} else {
+					o.log.Error("resume after restart failed", "ticket", t.ID, "err", err)
+				}
+			}
+			o.parkTicket(t)
+		case store.TicketVisiting:
+			o.parkTicket(t)
 		}
-		t.Status = store.TicketNeedsInput
-		if err := o.d.UpdateTicket(t); err != nil {
-			o.log.Error("reconcile update failed", "ticket", t.ID, "err", err)
-			continue
-		}
-		o.systemMessage(t.ProjectID, t.ID,
-			"hq restarted — engineer session parked. Reply in this thread to resume it.")
-		o.fileTicketItem(t, store.ItemBlocked, store.TierInterrupt, "parked by restart — reply to resume", "")
+	}
+}
+
+// parkTicket moves a ticket the restart orphaned into needs-input and
+// files an interrupt so the boss knows to reply-to-resume.
+func (o *Orch) parkTicket(t store.Ticket) {
+	t.Status = store.TicketNeedsInput
+	if err := o.d.UpdateTicket(t); err != nil {
+		o.log.Error("reconcile update failed", "ticket", t.ID, "err", err)
+		return
+	}
+	o.systemMessage(t.ProjectID, t.ID,
+		"hq restarted — engineer session parked. Reply in this thread to resume it.")
+	o.fileTicketItem(t, store.ItemBlocked, store.TierInterrupt, "parked by restart — reply to resume", "")
+}
+
+// Shutdown closes every live agent session so a daemon restart leaves
+// clean session files behind; the sessions themselves resume on the next
+// boot (engineers via Reconcile, EMs lazily on the next message).
+func (o *Orch) Shutdown() {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for id, l := range o.ems {
+		l.session.Close()
+		delete(o.ems, id)
+	}
+	for id, c := range o.engs {
+		c.session.Close()
+		delete(o.engs, id)
 	}
 }
 
