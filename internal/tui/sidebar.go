@@ -323,8 +323,8 @@ func (m *model) sidebarView(height int) string {
 			badge := ""
 			pad := 0
 			if t.Unread > 0 {
-				badge = " " + styleBadge.Render(fmt.Sprint(t.Unread))
-				pad = 3 + len(fmt.Sprint(t.Unread))
+				badge = " " + styleBadgeQuiet.Render(fmt.Sprint(t.Unread))
+				pad = 1 + len(fmt.Sprint(t.Unread))
 			}
 			line = styleSideTask.Render(fmt.Sprintf("  %s %s", statusIcon(t.Status), truncate(t.Title, sidebarWidth-8-pad))) + badge
 		case rowEM:
